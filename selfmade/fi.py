@@ -6,36 +6,21 @@ import numpy as np
 from sklearn.preprocessing import LabelEncoder
 from sklearn.inspection import permutation_importance
 
-def find_data(root):
-    i = 1
-    dfs = []
-    try:
-        root = Path(root)
-    except Exception:
-        print("Error occurred.")
-        raise
-
-    while (root / f"exp{i:03d}").exists():
-        df = pd.read_csv(root / f"exp{i:03d}" / "population.csv")
-        dfs.append(df)
-        i += 1
-    return dfs
-
-def harvest_data(stripped_cols = ['generation', 'test_accuracy', 'training_time', 
-               'train_accuracy', 'parameters'], root = "records", data_path = None):
-
-    if data_path:
-        df_merged = pd.read_csv(data_path)
+def get_latest_record(root : Path, format_folder, increment = True) -> Path:
+    if increment:
+        i = 1
+        if (root / f"{format_folder}{i:03d}").exists():
+            while (root / f"{format_folder}{i:03d}").exists():
+                i += 1
+            return root / f"{format_folder}{i-1:03d}"
+        else:
+            return "Path not found"
     else:
-        dfs = find_data(Path(root))
-        df_merged = pd.concat(dfs, ignore_index=True)
-
-    unused_cols = stripped_cols
-
-    df_new = df_merged.copy()
-    df_new = df_new.drop(unused_cols, axis=1)
-    
-    return df_new
+        if (root / f"{format_folder}").exists():
+            return root / f"{format_folder}"
+        else:
+            # raise Exception("Path not existed")
+            return "Path not existed"
 
 # for col in df_new.columns:
 #     if col.startswith("layer"):
@@ -96,19 +81,28 @@ def layer_tendency(dataframe : pd.DataFrame):
         layer_tendency[layer] = tendency
     return layer_tendency
 
-def preprocessing(df):
+def preprocessing(df : pd.DataFrame, stripped_cols = ['generation', 'test_accuracy', 'training_time', 
+               'train_accuracy', 'parameters']):
+    
+    df_new = df.copy()
+    df_new = df_new.drop(stripped_cols, axis=1)
+    df = df_new
     
     bits = len(expand_code(df.loc[0, "code"]))
     code_cols = [f"bit{i+1}" for i in range(bits)]
     df_code = pd.DataFrame(df['code'].apply(expand_code).tolist(), columns=code_cols)
 
+    # for col in df_code.columns:
+    #     if col.startswith("bit"):
+    #         print(df_code[col].value_counts())
+    
     df = df.drop(columns=["code"])
     df = pd.concat([df_code, df], axis=1)
 
     dir_df = pd.concat([df_code, df["validation_accuracy"]], axis=1)
 
     bit_dir = directions(dir_df)
-    print(bit_dir)
+    # print(bit_dir)
 
     # Layer Encoding
 
@@ -122,15 +116,17 @@ def preprocessing(df):
             df[col] = le.fit_transform(df[col])
             encoded[col] = le
             
-    layer_report = layer_tendency(df_layers)
+    layer_report = pd.DataFrame(layer_tendency(df_layers))
+    layer_report = layer_report.rename_axis("operation")
 
-    print(layer_report)
+    # print(layer_report)
     return df, bit_dir, layer_report
 
 def feature_importance(dataframe, device = "cpu"):
     
     if device == "gpu":
         import cudf
+        import cuml
         from cuml.ensemble import RandomForestRegressor
         from cuml.model_selection import train_test_split
         from cuml.metrics import r2_score, mean_absolute_error
@@ -158,8 +154,11 @@ def feature_importance(dataframe, device = "cpu"):
 
     pred = rf.predict(X_test)
 
-    print("R² :", r2_score(y_test, pred))
-    print("MAE:", mean_absolute_error(y_test, pred))
+    r2 = r2_score(y_test, pred)
+    mae = mean_absolute_error(y_test, pred)
+
+    print("R² :", r2)
+    print("MAE:", mae)
             
     importance = rf.feature_importances_
 
@@ -179,39 +178,55 @@ def feature_importance(dataframe, device = "cpu"):
         rf, X_test, y_test, n_repeats=10,
         random_state=42, n_jobs=1)
     
-    return importance, importance_df, perm
+    return {"rf_imp" : importance, "df_imp" : importance_df, "perm_imp" : perm, "r2": r2, "mae" : mae}
 
-def pipeline(device = "cpu", data_path = None):
-    df_full = harvest_data(data_path = data_path)
-    df_processed, bit_dir, layer_report = preprocessing(df_full)
-    imp, df_imp, perm = feature_importance(df_processed, device)
+def pipeline(data : pd.DataFrame, device = "cpu"):
+
+    df_processed, bit_dir, layer_report = preprocessing(data)
+    fi_dict = feature_importance(df_processed, device)
     
     from scipy.stats import spearmanr
     
-    rf_imp = imp
-    perm_imp = perm.importances_mean
+    rf_imp = fi_dict["rf_imp"]
+    perm_imp = fi_dict["perm_imp"].importances_mean
     
     corr, p_val = spearmanr(rf_imp, perm_imp)
 
-    output_dict = {"corr" : corr, "p_value" : p_val, "df_importance" : df_imp,
-                    "bit_directions" : bit_dir, "layer_report" : layer_report
+    output_dict = {"corr" : corr, "p_value" : p_val, "df_importance" : fi_dict["df_imp"],
+                    "bit_directions" : bit_dir, "layer_report" : layer_report,
+                    "r2" : fi_dict["r2"], "mae" : fi_dict["mae"]
                    }
     
     return output_dict
 
 # Testing ground
-
 if __name__ == "__main__":
-    # data_path = "/kaggle/input/datasets/an0rm4lp3rs0n/fi-dts/population.csv"
-    data_path = "/kaggle/input/datasets/an0rm4lp3rs0n/fi-full/population_full.csv"
-    results = pipeline(device = "gpu", data_path=data_path)
+
+    dp = "./guided_records/exp001/population.csv"
+
+    # results = pipeline(device = "gpu", data_path=data_path)
     # CPU fallback
-    # results = pipeline()
+    results = pipeline(device="cpu", data_path=dp)
     
     print("correlation: ", results["corr"])
     print("p-value: ", results["p_value"])
     print()
     df_imp = results["df_importance"]
-    print(df_imp)
+    # print(df_imp)
 
-    df_imp.to_csv("fi.csv")
+    root = Path("./fi_reports")
+
+    i = 1
+    while (root / f"fi{i:03d}").exists():
+        i += 1
+
+    fi_dir = root / f"fi{i:03d}"
+    fi_dir.mkdir(parents=True)
+
+    df_imp.to_csv(fi_dir / "fi.csv")
+
+    df_bit = results["bit_directions"]
+    df_layer = results["layer_report"]
+
+    df_bit.to_csv(fi_dir / "bit_guidance.csv")
+    df_layer.to_csv(fi_dir / "layer_guidance.csv")
