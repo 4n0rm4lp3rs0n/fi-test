@@ -7,6 +7,7 @@ from nasbench import api
 from pathlib import Path
 import pandas as pd
 from collections import Counter
+import json
 
 from time import time
 
@@ -151,7 +152,6 @@ class Guidance:
 class Genome:
     def __init__(self, code, operations):
         self.code = code
-        self.matrix = string_to_matrix(code)
         self.operations = operations
         self.fitness = None
         self.metrics = None
@@ -643,10 +643,9 @@ class Evaluator:
             self.nasbench = api.NASBench('./nasbench_full.tfrecord')
     
     def evaluate(self, genome : Genome):
-        
         if self.method == "nasbench":
             # print("evaluating genome with code ", genome.code)
-            model_spec = api.ModelSpec(matrix=genome.matrix, ops = genome.operations)
+            model_spec = api.ModelSpec(matrix=string_to_matrix(genome.code), ops = genome.operations)
             data = self.nasbench.query(model_spec)
             # print(f"Data: {data}")
             
@@ -804,10 +803,39 @@ def guided_layers(limit, guidance : dict):
     ops.append('output')
     return ops
 
-# Main pipeline
+# Output results
+def parse_out(path_dir : Path, run_res : dict, eval_res : dict):
+    run_checks = {"population_data", "configs"}
+    eval_checks = {"df_importance", "bit_directions", "layer_report", "r2", "mae", "corr", "p_value"}
+    
+    if not path_dir.exists() or not any(path_dir.iterdir()):
+        path_dir.mkdir(parents=True)
+
+    if run_res.keys() < run_checks:
+        raise KeyError(f"run_res is missing values: {run_res.keys()}")
+    if eval_res.keys() < eval_checks:
+        raise KeyError(f"eval_res is missing values: {eval_res.keys()}")
+
+    df = run_res["population_data"]
+    cfg = run_res["configs"]
+
+    cfg["r2"] = eval_res["r2"]
+    cfg["mae"] = eval_res["mae"]
+    cfg["corr"] = eval_res["corr"]
+    cfg["p_value"] = eval_res["p_value"]
+    
+    df.to_csv(path_dir / "population.csv")
+    eval_res["df_importance"].to_csv(path_dir / "fi.csv")
+    eval_res["bit_directions"].to_csv(path_dir / "bitgui.csv")
+    eval_res["layer_report"].to_csv(path_dir / "layergui.csv")
+
+    with open(path_dir / "config.json", "w") as c:
+        json.dump(cfg, c, indent=4)
+
+# Operation methods (Vanilla & Guided)
 
 def vanilla_run(operations, population_size, 
-        edge_limit = 9, layer_limit = 7, generations = 100, eval_method = "nasbench",
+        edge_limit = 9, layer_limit = 7, generations = 100, evaluator : Evaluator = Evaluator("nasbench"),
         selector = "tournament", elite_size = 2, survivors = 1,
         candidates_per_round = 4, mutation_rate = 0.05):
     
@@ -826,10 +854,6 @@ def vanilla_run(operations, population_size,
     
     if not isinstance(generations, int) or generations <= 0:
         raise ValueError("Generation must be an integer larger than 0") 
-    
-    valid_evals = {"nasbench"}
-    if eval_method not in valid_evals:
-        raise ValueError(f"Unknown evaluation method: {eval_method}")
      
     valid_selectors = {"tournament"}
     if selector not in valid_selectors:
@@ -866,7 +890,7 @@ def vanilla_run(operations, population_size,
         raise ValueError("Operations contain duplicates") 
 
     # Main pipeline
-    evaluator = Evaluator(eval_method)
+    # evaluator = Evaluator(eval_method)
 
     pop = Population(population_size, layer_limit, edge_limit, evaluator, mutation_rate=mutation_rate)
     pop.initialize(operations)
@@ -895,7 +919,7 @@ def vanilla_run(operations, population_size,
     return {"population_data" : pd.DataFrame(pop.data), "configs" : pop.config}
 
 def guided_run(operations, population_size, 
-        edge_limit = 9, layer_limit = 7, generations = 100, eval_method = "nasbench",
+        edge_limit = 9, layer_limit = 7, generations = 100, evaluator : Evaluator = Evaluator("nasbench"),
         selector = "tournament", elite_size = 2, survivors = 1,
         candidates_per_round = 4, mutation_rate = 0.05, bit_guidance = None, 
         layer_guidance = None, feature_importance = None, config = None, pre_pop = None, alpha = 4, beta = 4) -> pd.DataFrame:
@@ -915,10 +939,6 @@ def guided_run(operations, population_size,
     
     if not isinstance(generations, int) or generations <= 0:
         raise ValueError("Generation must be an integer larger than 0") 
-    
-    valid_evals = {"nasbench"}
-    if eval_method not in valid_evals:
-        raise ValueError(f"Unknown evaluation method: {eval_method}")
      
     valid_selectors = {"tournament"}
     if selector not in valid_selectors:
@@ -955,7 +975,7 @@ def guided_run(operations, population_size,
         raise ValueError("Operations contain duplicates") 
 
     # Main pipeline
-    evaluator = Evaluator(eval_method)
+    # evaluator = Evaluator(eval_method)
     # print("initiating population...")
     pop = Population(population_size, layer_limit, edge_limit, evaluator, 
                      bit_guidance, layer_guidance, feature_importance,
@@ -1011,6 +1031,7 @@ def get_stats(mode):
             return {'edge_limit': edge_limit,
                     'layer_limit': layer_limit,
                     'operations': operations,
+                    'evaluator' : Evaluator("nasbench")
                     }
         elif mode == "nasbench201":
             edge_limit = 6

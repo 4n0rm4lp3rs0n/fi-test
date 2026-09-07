@@ -1,5 +1,5 @@
 from selfmade.fi import pipeline, get_latest_record
-from selfmade.genome import vanilla_run, guided_run, get_stats
+from selfmade.genome import vanilla_run, guided_run, get_stats, parse_out
 from pathlib import Path
 import json
 import pandas as pd
@@ -15,6 +15,7 @@ stats = get_stats(mode)
 edge_limit = stats["edge_limit"]
 layer_limit = stats["layer_limit"]
 operations = stats["operations"]
+eval_method = stats["evaluator"]
 
 record_root = Path("./records_g")
 
@@ -22,30 +23,31 @@ vadir = record_root / "vanilla"
 
 if not vadir.exists() or not any(vadir.iterdir()):
 
-    vanilla_dict = vanilla_run(operations, population_size, edge_limit, layer_limit, generations)
+    vanilla_dict = vanilla_run(operations, population_size, edge_limit, layer_limit, generations, evaluator=eval_method)
+    vanilla_res = pipeline(data=vanilla_dict["population_data"], device='cpu')
 
-    vadf = vanilla_dict["population_data"]
-    vacfg = vanilla_dict["configs"]
+    parse_out(vadir, vanilla_dict, vanilla_res)
 
-    vadir.mkdir(parents=True, exist_ok=True)
+    # vadf = vanilla_dict["population_data"]
+    # vacfg = vanilla_dict["configs"]
 
-    vanilla_res = pipeline(data=vadf, device='cpu')
+    # vadir.mkdir(parents=True, exist_ok=True)
 
     print("vanilla correlation: ", vanilla_res["corr"])
     print("vanilla p-value: ", vanilla_res["p_value"])
 
-    vadf.to_csv(vadir / "population.csv")
-    vanilla_res["df_importance"].to_csv(vadir / "fi.csv")
-    vanilla_res["bit_directions"].to_csv(vadir / "bitgui.csv")
-    vanilla_res["layer_report"].to_csv(vadir / "layergui.csv")
+    # vadf.to_csv(vadir / "population.csv")
+    # vanilla_res["df_importance"].to_csv(vadir / "fi.csv")
+    # vanilla_res["bit_directions"].to_csv(vadir / "bitgui.csv")
+    # vanilla_res["layer_report"].to_csv(vadir / "layergui.csv")
 
-    vacfg["r2"] = vanilla_res["r2"]
-    vacfg["mae"] = vanilla_res["mae"]
-    vacfg["corr"] = vanilla_res["corr"]
-    vacfg["p_value"] = vanilla_res["p_value"]
+    # vacfg["r2"] = vanilla_res["r2"]
+    # vacfg["mae"] = vanilla_res["mae"]
+    # vacfg["corr"] = vanilla_res["corr"]
+    # vacfg["p_value"] = vanilla_res["p_value"]
 
-    with open(vadir / "config.json", "w") as c:
-        json.dump(vacfg, c, indent = 4)
+    # with open(vadir / "config.json", "w") as c:
+    #     json.dump(vacfg, c, indent = 4)
 
 if experiments == 0:
     exit()
@@ -73,33 +75,35 @@ for i in range(1, experiments + 1):
 
     # print("prior data gathered")
 
-    gui_dict = guided_run(operations, population_size, edge_limit, layer_limit, generations, bit_guidance=bitgui,
+    gui_dict = guided_run(operations, population_size, edge_limit, layer_limit, generations, evaluator=eval_method, bit_guidance=bitgui,
                         layer_guidance=layergui, feature_importance=feature_importance, config=config, pre_pop=pop)
 
-    guidf = gui_dict["population_data"]
-    guicfg = gui_dict["configs"]
+    # guidf = gui_dict["population_data"]
+    # guicfg = gui_dict["configs"]
 
     i = 1
     while (gpath / f"{gui_format}{i:03d}").exists():
         i += 1
 
     guipath = gpath / f"{gui_format}{i:03d}"
-    guipath.mkdir(parents=True)
+    gui_res = pipeline(data = gui_dict["population_data"], device="cpu")
 
-    gui_res = pipeline(data = guidf, device="cpu")
+    # guipath.mkdir(parents=True)
     print("guidance correlation: ", gui_res["corr"])
     print("guidance p-value: ", gui_res["p_value"])
 
-    guicfg["r2"] = gui_res["r2"]
-    guicfg["mae"] = gui_res["mae"]
-    guicfg["corr"] = gui_res["corr"]
-    guicfg["p_value"] = gui_res["p_value"]
+    parse_out(guipath, gui_dict, gui_res)
 
-    guidf.to_csv(guipath / "population.csv")
-    gui_res["df_importance"].to_csv(guipath / "fi.csv")
-    gui_res["bit_directions"].to_csv(guipath / "bitgui.csv")
-    gui_res["layer_report"].to_csv(guipath / "layergui.csv")
+    # guicfg["r2"] = gui_res["r2"]
+    # guicfg["mae"] = gui_res["mae"]
+    # guicfg["corr"] = gui_res["corr"]
+    # guicfg["p_value"] = gui_res["p_value"]
 
-    with open(guipath / "config.json", "w") as c:
-        json.dump(guicfg, c, indent=4)
+    # guidf.to_csv(guipath / "population.csv")
+    # gui_res["df_importance"].to_csv(guipath / "fi.csv")
+    # gui_res["bit_directions"].to_csv(guipath / "bitgui.csv")
+    # gui_res["layer_report"].to_csv(guipath / "layergui.csv")
+
+    # with open(guipath / "config.json", "w") as c:
+    #     json.dump(guicfg, c, indent=4)
     

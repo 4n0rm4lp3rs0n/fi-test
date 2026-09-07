@@ -1,7 +1,6 @@
 from selfmade.fi import pipeline, get_latest_record
-from selfmade.genome import vanilla_run, guided_run
+from selfmade.genome import vanilla_run, parse_out
 from pathlib import Path
-import json
 
 experiments = 5
 generations = 10
@@ -24,26 +23,27 @@ for e in range(experiments):
     vadir = record_root / f"exp{e:03d}"
 
     vanilla_dict = vanilla_run(operations, population_size, edge_limit, layer_limit, generations)
+    vanilla_res = pipeline(data=vanilla_dict["population_data"], device='cpu')
 
-    vadf = vanilla_dict["population_data"]
-    vacfg = vanilla_dict["configs"]
+    parse_out(vadir, vanilla_dict, vanilla_res)
 
-    vadir.mkdir(parents=True, exist_ok=True)
+    # vadf = vanilla_dict["population_data"]
+    # vacfg = vanilla_dict["configs"]
 
-    vanilla_res = pipeline(data=vadf, device='cpu')
+    # vadir.mkdir(parents=True, exist_ok=True)
 
     print("vanilla correlation: ", vanilla_res["corr"])
     print("vanilla p-value: ", vanilla_res["p_value"])
 
-    vadf.to_csv(vadir / "population.csv")
-    vanilla_res["df_importance"].to_csv(vadir / "fi.csv")
-    vanilla_res["bit_directions"].to_csv(vadir / "bitgui.csv")
-    vanilla_res["layer_report"].to_csv(vadir / "layergui.csv")
+    # vadf.to_csv(vadir / "population.csv")
+    # vanilla_res["df_importance"].to_csv(vadir / "fi.csv")
+    # vanilla_res["bit_directions"].to_csv(vadir / "bitgui.csv")
+    # vanilla_res["layer_report"].to_csv(vadir / "layergui.csv")
 
-    vacfg["r2"] = vanilla_res["r2"]
-    vacfg["mae"] = vanilla_res["mae"]
-    vacfg["corr"] = vanilla_res["corr"]
-    vacfg["p_value"] = vanilla_res["p_value"]
+    # vacfg["r2"] = vanilla_res["r2"]
+    # vacfg["mae"] = vanilla_res["mae"]
+    # vacfg["corr"] = vanilla_res["corr"]
+    # vacfg["p_value"] = vanilla_res["p_value"]
 
-    with open(vadir / "config.json", "w") as c:
-        json.dump(vacfg, c, indent = 4)
+    # with open(vadir / "config.json", "w") as c:
+    #     json.dump(vacfg, c, indent = 4)
