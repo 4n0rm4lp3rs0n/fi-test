@@ -4,6 +4,7 @@ Genome = Matrix/String + Operations
 import numpy as np
 import random
 from nasbench import api
+from nb201.nas_201_api import NASBench201API as API
 from pathlib import Path
 import pandas as pd
 from collections import Counter
@@ -637,13 +638,19 @@ class Population:
 class Evaluator:
     
     def __init__(self, method):
+        allowed_methods = ["nasbench101", "nasbench201"]
+        if method not in allowed_methods:
+            raise ValueError(f"{method} not allowed")
+        
         self.method = method
         
-        if method == "nasbench":
-            self.nasbench = api.NASBench('./nasbench_full.tfrecord')
+        if method == "nasbench101":
+            self.nasbench = api.NASBench('./datas/nasbench_full.tfrecord')
+        elif method == "nasbench201":
+            self.nasbench = API("./datas/NAS-Bench-201-v1_1-096897.pth")
     
     def evaluate(self, genome : Genome):
-        if self.method == "nasbench":
+        if self.method == "nasbench101":
             # print("evaluating genome with code ", genome.code)
             model_spec = api.ModelSpec(matrix=string_to_matrix(genome.code), ops = genome.operations)
             data = self.nasbench.query(model_spec)
@@ -657,6 +664,8 @@ class Evaluator:
             #         print(data_point)
             # return data["validation_accuracy"]
             return data
+        if self.method == "nasbench201":
+            return "breh"
 
 # HELPER FUNCTIONS
 
@@ -835,7 +844,7 @@ def parse_out(path_dir : Path, run_res : dict, eval_res : dict):
 # Operation methods (Vanilla & Guided)
 
 def vanilla_run(operations, population_size, 
-        edge_limit = 9, layer_limit = 7, generations = 100, evaluator : Evaluator = Evaluator("nasbench"),
+        edge_limit = 9, layer_limit = 7, generations = 100, evaluator : Evaluator = None,
         selector = "tournament", elite_size = 2, survivors = 1,
         candidates_per_round = 4, mutation_rate = 0.05):
     
@@ -919,7 +928,7 @@ def vanilla_run(operations, population_size,
     return {"population_data" : pd.DataFrame(pop.data), "configs" : pop.config}
 
 def guided_run(operations, population_size, 
-        edge_limit = 9, layer_limit = 7, generations = 100, evaluator : Evaluator = Evaluator("nasbench"),
+        edge_limit = 9, layer_limit = 7, generations = 100, evaluator : Evaluator = None,
         selector = "tournament", elite_size = 2, survivors = 1,
         candidates_per_round = 4, mutation_rate = 0.05, bit_guidance = None, 
         layer_guidance = None, feature_importance = None, config = None, pre_pop = None, alpha = 4, beta = 4) -> pd.DataFrame:
@@ -1031,7 +1040,7 @@ def get_stats(mode):
             return {'edge_limit': edge_limit,
                     'layer_limit': layer_limit,
                     'operations': operations,
-                    'evaluator' : Evaluator("nasbench")
+                    'evaluator' : Evaluator("nasbench101")
                     }
         elif mode == "nasbench201":
             edge_limit = 6

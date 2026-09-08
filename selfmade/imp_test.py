@@ -17,7 +17,7 @@ layer_limit = stats["layer_limit"]
 operations = stats["operations"]
 eval_method = stats["evaluator"]
 
-record_root = Path("./records_g")
+record_root = Path(f"./records_g_{mode}")
 
 vadir = record_root / "vanilla"
 
