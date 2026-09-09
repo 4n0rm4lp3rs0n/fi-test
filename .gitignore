@@ -2,7 +2,6 @@ venv/
 venv37/
 __pycache__/
 *.pyc
-nasbench_full.tfrecord
 records/
 records*/
 datas/
