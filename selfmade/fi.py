@@ -98,7 +98,6 @@ def preprocessing(df : pd.DataFrame, stripped_cols = ['generation', 'test_accura
     
     df = df.drop(columns=["code"])
     df = pd.concat([df_code, df], axis=1)
-
     dir_df = pd.concat([df_code, df["validation_accuracy"]], axis=1)
 
     bit_dir = directions(dir_df)

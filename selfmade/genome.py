@@ -163,54 +163,14 @@ class Genome:
         # dimension decrease to match nasbench's evaluation requirement
         dims = len(ops) - 1
         while True:
-            code = random_string(dims)
+            code = rebuild_code(random_gen(round((dims*(dims+1)) / 2)), dims)
             valid, _ = valid_architecture(string_to_matrix(code), edge_limit)
             if valid:
                 break
         return cls(code, ops)
 
     @classmethod
-    # def guided_genome(cls, layer_limit, edge_limit, bit_guidance, layer_guidance, 
-    #                   feature_importance, global_var, pop, p0 = 0, mutation_rate = 0,
-    #                   alpha = 4, beta = 4, eps = 1e-3):
     def guided_genome(cls, layer_limit, edge_limit, guidance : Guidance):
-        # print("generating guided ops...")
-
-        # # Calculating bit probabilities (P(bit = 1))
-        # bit_imp = feature_importance[feature_importance["feature"].str.startswith("bit")].copy()
-        # bit_imp["I_norm"] = bit_imp["importance"] / bit_imp["importance"].max()
-
-        # bgui = bit_guidance.merge(bit_imp[["feature", "I_norm"]], on = "feature")
-        # logit0 = np.log(p0 / (1 - p0))
-
-        # direction = bgui["direction"].fillna(0.0)
-        # strength = bgui["direction_strength"].fillna(0.0)
-
-        # g = np.sign(direction) * np.tanh(strength) * bgui["I_norm"]
-        # p_gui = 1 / (1 + np.exp(-(logit0 + alpha * global_var * g )))
-        # p_final_bits = list((1 - mutation_rate) * p_gui + mutation_rate * 0.5)
-
-        # # Calculating layer probabilities (P(layer(i,o)))
-        # layer_imp = feature_importance[feature_importance["feature"].str.startswith("layer")].copy()
-        # layer_imp["I_norm"] = layer_imp["importance"] / layer_imp["importance"].max()
-
-        # prob_layers = {}
-        # lcount = layer_limit - 2
-        # for j in range(1, lcount + 1):
-        #     col = f"layer {j}"
-        #     all_dist = pop[col].value_counts(normalize = True)
-        #     tendency = layer_guidance.set_index("operation")[col]
-        #     I_j = layer_imp.loc[layer_imp["feature"] == col, "I_norm"].values[0]
-        #     ops = all_dist.index
-
-        #     logits = np.array([np.log(all_dist[o] + eps) + beta * global_var * I_j * tendency.get(o, 0.0) for o in ops])
-        #     p_gui = np.exp(logits - logits.max())
-        #     p_gui /= p_gui.sum()
-
-        #     K = len(ops)
-        #     p_final_layers = (1 - mutation_rate) * p_gui + mutation_rate * (1/K)
-        #     prob_layers[col] = list(zip(ops, p_final_layers))
-
         ops = guided_layers(layer_limit, guidance.prob_layers)
         dims = len(ops) - 1
         # print("generating guided bits...")
@@ -359,7 +319,7 @@ class Population:
         # fails = []
         
         # Vanilla crossover
-        if self.bit_guidance is None and self.layer_guidance is None:
+        if self.bit_guidance is None:
             # while True:
             genome1 = parent1.code.split(sep="-")
             genome2 = parent2.code.split(sep="-")
@@ -440,7 +400,7 @@ class Population:
         ops1 = parent1.operations[1:-1]
         ops2 = parent2.operations[1:-1]
         
-        if self.bit_guidance is None and self.layer_guidance is None:
+        if self.layer_guidance is None:
             ops_cut = random.randint(1, len(ops1) - 1)
 
             child1_ops = ops1[:ops_cut] + ops2[ops_cut:]       
@@ -471,7 +431,7 @@ class Population:
                 
     def mutation(self, genome, avail_ops, chance=0.05):
         # Vanilla mutation
-        if self.bit_guidance is None and self.layer_guidance is None:
+        if self.bit_guidance is None:
             # Genome mutation
             pre_code = list(genome.code)
             # while True:
@@ -495,23 +455,6 @@ class Population:
             # print(invalids)
             # print("total attempts: ", attempt)
 
-            if attempt == MAX_PAIR_RETRIES - 1 and new_code is None:
-                new_code = pre_code
-            # Operation mutation  
-            # copy() is used to make a new variable 
-            # (equal sign means connection to an existed)
-            pre_ops = genome.operations.copy()
-            
-            # Exclude IO
-            for o in range(1, len(pre_ops) - 1):
-                if random.random() < chance:
-                    choices = [op for op in avail_ops if op != pre_ops[o]]
-                    pre_ops[o] = random.choice(choices)
-                    
-            # print(f"before mutation: {genome.operations}")
-            # print(f"after mutation: {pre_ops}")
-            
-            return Genome(new_code, pre_ops)
         else:
             # Guided mutation
             pre_code = flatten_code(genome.code)
@@ -536,9 +479,22 @@ class Population:
             
             # print("total attempts: ", attempt)
             
-            if attempt == MAX_PAIR_RETRIES - 1 and new_code is None:
-                new_code = pre_code
+        if attempt == MAX_PAIR_RETRIES - 1 and new_code is None:
+            new_code = pre_code
+
+        if self.layer_guidance is None:
+            # Operation mutation  
+            # copy() is used to make a new variable 
+            # (equal sign means connection to an existed)
+            pre_ops = genome.operations.copy()
             
+            # Exclude IO
+            for o in range(1, len(pre_ops) - 1):
+                if random.random() < chance:
+                    choices = [op for op in avail_ops if op != pre_ops[o]]
+                    pre_ops[o] = random.choice(choices)
+
+        else:
             # Operation mutation  
             # copy() is used to make a new variable 
             # (equal sign means connection to an existed)
@@ -551,9 +507,9 @@ class Population:
                     choices = [op for op in avail_ops if op != pre_ops[o]]
                     pre_ops[o] = random.choice(choices)
                 
-            # print(f"before mutation: {genome.operations}")
-            # print(f"after mutation: {pre_ops}")
-            return Genome(new_code, pre_ops)
+        # print(f"before mutation: {genome.operations}")
+        # print(f"after mutation: {pre_ops}")
+        return Genome(new_code, pre_ops)
     
     def evolve(self, operations, generation,
                elite_size = 2, selector = "tournament", survivors = 1,
@@ -637,7 +593,7 @@ class Population:
 
 class Evaluator:
     
-    def __init__(self, method):
+    def __init__(self, method, dataset : str = "cifar100"):
         allowed_methods = ["nasbench101", "nasbench201"]
         if method not in allowed_methods:
             raise ValueError(f"{method} not allowed")
@@ -648,6 +604,8 @@ class Evaluator:
             self.nasbench = api.NASBench('./datas/nasbench_full.tfrecord')
         elif method == "nasbench201":
             self.nasbench = API("./datas/NAS-Bench-201-v1_1-096897.pth")
+
+        self.dataset = dataset
     
     def evaluate(self, genome : Genome):
         if self.method == "nasbench101":
@@ -665,26 +623,24 @@ class Evaluator:
             # return data["validation_accuracy"]
             return data
         if self.method == "nasbench201":
-            
-            return "breh"
+            idx = self.nasbench.query_index_by_arch(self.nb201parser(genome))
+            info = self.nasbench.get_more_info(idx, self.dataset, hp=200, is_random=False)
+            return info["valid-accuracy"]
         
-    def nb201parser(inp_layers : list):
+    def nb201parser(genes : list):
         # exp list : [1,3,2,3,1,4]
         op_dict = {0 : "none", 1 : "skip_connect", 2 : "nor_conv_1x1", 3 : "nor_conv_3x3", 4 : "avg_pool_3x3"}
-        idx = 0
-        query = []
-        for layer in range(3):
-            qp = []
-            for i in range(layer + 1):
-            # for i in range(layer):
-                op = op_dict[inp_layers[idx]]
-                print(f"{op}, {i}")
-                qp.append(f"{op}~{i}")
-                idx += 1
-            query.append(qp)
-        return query
+        assert len(genes) == 6
+        return (f"|{op_dict[genes[0]]}~0|+"
+                f"|{op_dict[genes[1]]}~0|{op_dict[genes[2]]}~1|+"
+                f"|{op_dict[genes[3]]}~0|{op_dict[genes[4]]}~1|{op_dict[genes[5]]}~2|"
+        )
 
 # HELPER FUNCTIONS
+
+def random_gen(bit_length, min_val = 0, max_val = 1):
+    gen_genome = [str(random.randint(min_val, max_val)) for _ in range(bit_length)]
+    return gen_genome
 
 def flatten_code(code):
     return list(code.replace("-", ""))
@@ -1068,28 +1024,29 @@ def get_stats(mode):
 
 # Testing ground
 if __name__ == "__main__":
-    start = time()
-    conv1x1 = 'conv1x1-bn-relu'
-    conv3x3 = 'conv3x3-bn-relu'
-    maxpool3x3 = 'maxpool3x3'
+    # start = time()
+    # conv1x1 = 'conv1x1-bn-relu'
+    # conv3x3 = 'conv3x3-bn-relu'
+    # maxpool3x3 = 'maxpool3x3'
 
-    operations = [conv1x1, conv3x3, maxpool3x3]
+    # operations = [conv1x1, conv3x3, maxpool3x3]
 
-    # fi_report_path = Path("./fi_reports/fi1")
-    fi_report_path = Path("./fi_reports/fi2")
+    # # fi_report_path = Path("./fi_reports/fi1")
+    # fi_report_path = Path("./fi_reports/fi2")
 
-    fi = pd.read_csv(fi_report_path / "fi.csv")
-    bit_gui = pd.read_csv(fi_report_path / "bit_guidance.csv")
-    layer_gui = pd.read_csv(fi_report_path / "layer_guidance.csv")
-    try:
-        # run(10, operations, population_size=10000, generations=100)
-        guided_run(operations, population_size=100000, generations=100, bit_guidance=bit_gui, layer_guidance=layer_gui)
-    except ValueError as e:
-        print(e)
-    print("Operation time: ", time() - start)
+    # fi = pd.read_csv(fi_report_path / "fi.csv")
+    # bit_gui = pd.read_csv(fi_report_path / "bit_guidance.csv")
+    # layer_gui = pd.read_csv(fi_report_path / "layer_guidance.csv")
+    # try:
+    #     # run(10, operations, population_size=10000, generations=100)
+    #     guided_run(operations, population_size=100000, generations=100, bit_guidance=bit_gui, layer_guidance=layer_gui)
+    # except ValueError as e:
+    #     print(e)
+    # print("Operation time: ", time() - start)
 
     # print(random_string(7))
 
     # test_list = [random_string(7) for _ in range(100)]
     # for t in test_list:
     #     print(t, valid_architecture(string_to_matrix(t)))
+    print(random_gen(21))
