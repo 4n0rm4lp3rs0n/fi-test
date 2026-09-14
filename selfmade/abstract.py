@@ -107,7 +107,7 @@ class Evaluator(ABC):
         Return a normalized result dictionary.
 
         The generic GA should be able to rely on at least:
-            result["validation_accuracy"]
+            result["fitness"]
         """
         pass
 
