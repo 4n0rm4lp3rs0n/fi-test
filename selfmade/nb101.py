@@ -14,7 +14,7 @@ import selfmade.abstract as abstract
 from time import time
 
 # GLOBAL PARAMETERS
-MAX_PAIR_RETRIES = 1000
+MAX_PAIR_RETRIES = 10000
 
 class GenomeNB101(abstract.Genome):
     def __init__(self, code, operations):
@@ -28,26 +28,24 @@ class GenomeNB101(abstract.Genome):
         return self.representation["code"]
 
     @property
-    def code(self):
+    def operations(self):
         return self.representation["operations"]
 
 class NASBench101Evaluator(abstract.Evaluator):
 
     def __init__(self, data_path, search_space):
-        from nasbench import api
-
-        self.api = api.NASBench(data_path)
+        self.nasbench = api.NASBench(data_path)
         self.space = search_space
 
     def evaluate(self, genome):
 
         decoded = self.space.decode(genome)
-        spec = self.api.ModelSpec(
+        spec = api.ModelSpec(
             matrix=decoded["matrix"],
             ops=decoded["operations"]
         )
 
-        result = self.api.query(spec)
+        result = self.nasbench.query(spec)
 
         return {
                 "fitness": result["validation_accuracy"],
@@ -74,9 +72,6 @@ class NASBench101Space(abstract.SearchSpace):
 
         self.operations = operations
         self.actual_layers = layer_limit - 2
-        
-        for i in range(self.layer_limit - 2):
-            self.data[f"layer {i+1}"] = []
 
     def random_genome(self):
         ops = random_operation(self.layer_limit, self.operations)
@@ -89,7 +84,7 @@ class NASBench101Space(abstract.SearchSpace):
             if valid:
                 return GenomeNB101(code, ops)
 
-    def guided_genome(self, guidance : classmethod):
+    def guided_genome(self, guidance):
         ops = guided_layers(self.layer_limit, guidance.prob_layers)
         dims = len(ops) - 1
 
@@ -105,11 +100,11 @@ class NASBench101Space(abstract.SearchSpace):
         return valid_architecture(matrix, self.edge_limit)
 
     def decode(self, genome):
-        matrix = string_to_matrix(genome.code)
+        matrix = string_to_matrix(genome.representation["code"])
 
         return {
             "matrix" : matrix,
-            "operations" : genome.operations
+            "operations" : genome.representation["operations"]
         }
 
     def feature_data(self, genome):
@@ -151,11 +146,12 @@ class NASBench101Space(abstract.SearchSpace):
 
     def vanilla_crossover(self, parent1, parent2):
         # while True:
-        genome1 = self.space.to_genes(parent1.code)
-        genome2 = self.space.to_genes(parent2.code)
+        genome1 = self.to_genes(parent1)
+        genome2 = self.to_genes(parent2)
 
         invalids = Counter()
-        # fails = []
+        success = False
+        fails = []
         
         for attempt in range(MAX_PAIR_RETRIES):
         
@@ -169,21 +165,25 @@ class NASBench101Space(abstract.SearchSpace):
         
             if not valid1:
                 invalids[reason1] += 1
-                # fails.append(["child 1", child1_code, reason1])
+                fails.append(["child 1", child1_code, reason1])
             if not valid2:
                 invalids[reason2] += 1
-                # fails.append(["child 2", child2_code, reason2])
+                fails.append(["child 2", child2_code, reason2])
         
             # if attempt % 1000 == 0:
             #     print(f"attempt no. {attempt}")
         
             if valid1 and valid2:
+                success = True
                 break
 
         # print("total attempts: ", attempt)
 
+        print(invalids)
+        input()
+
         # Children are still invalid after too many crossovers
-        if attempt == MAX_PAIR_RETRIES - 1 and not (child1_code and child2_code):
+        if not success:
             return None, None
 
         ops1 = parent1.operations[1:-1]
@@ -202,6 +202,7 @@ class NASBench101Space(abstract.SearchSpace):
     def guided_crossover(self, parent1, parent2, guidance):
 
         invalids = Counter()
+        success = False
         # fails = []
         genome1 = flatten_code(parent1.code)
         genome2 = flatten_code(parent2.code)
@@ -241,10 +242,11 @@ class NASBench101Space(abstract.SearchSpace):
             #     print(f"attempt no. {attempt}")
         
             if valid1 and valid2:
+                success = True
                 break
         
         # Children are still invalid after too many crossovers
-        if attempt == MAX_PAIR_RETRIES - 1 and not (child1_code and child2_code):
+        if not success:
             return None, None
 
         # Operation crossover
@@ -277,10 +279,12 @@ class NASBench101Space(abstract.SearchSpace):
 
     def vanilla_mutation(self, genome, avail_ops, chance=0.05):
         # Genome mutation
-        pre_code = list(genome.code)
+        original = list(genome.code)
         # while True:
         invalids = Counter()
+        success = False
         for attempt in range(MAX_PAIR_RETRIES):
+            pre_code = original.copy()
             for p in range(len(pre_code)):
                 if pre_code[p] in ('0', '1'):
                     if random.random() < chance:
@@ -289,6 +293,7 @@ class NASBench101Space(abstract.SearchSpace):
             valid, reason = self.validate(new_code)
         
             if valid:
+                success = True
                 break
             else:
                 invalids[reason] += 1
@@ -299,7 +304,7 @@ class NASBench101Space(abstract.SearchSpace):
         # print(invalids)
         # print("total attempts: ", attempt)
 
-        if attempt == MAX_PAIR_RETRIES - 1 and new_code is None:
+        if not success:
             new_code = pre_code
 
         # Operation mutation  
@@ -317,17 +322,20 @@ class NASBench101Space(abstract.SearchSpace):
 
     def guided_mutation(self, genome, avail_ops, guidance):
         # Guided mutation
-        pre_code = flatten_code(genome.code)
+        original = flatten_code(genome.code)
         new_code = None
         invalids = Counter()
+        success = False
         for attempt in range(MAX_PAIR_RETRIES):
         # while True:
+            pre_code = original.copy()
             for p in range(len(pre_code)):
                 if pre_code[p] in ('0', '1') and random.random() < guidance.get_prob_bit(p + 1):
                     pre_code[p] = '0' if pre_code[p] == '1' else '1'
             new_code = rebuild_code(pre_code, self.actual_layers + 1)
             valid, reason = self.validate(new_code)
             if valid:
+                success = True
                 break
             else:
                 invalids[reason] += 1
@@ -339,7 +347,7 @@ class NASBench101Space(abstract.SearchSpace):
         
         # print("total attempts: ", attempt)
         
-        if attempt == MAX_PAIR_RETRIES - 1 and new_code is None:
+        if not success:
             new_code = pre_code
 
         # Operation mutation  
@@ -360,35 +368,35 @@ class Population:
     """General population for all NASes (maybe)"""
 
     def __init__(self, population_size, search_space, evaluator,
-                 guidance=None, mutation_rate=0.05):
+                 guidance=None, mutation_rate=0.05, elite_size = 2, 
+                 selector = "tournament", survivors = 1, candidates_per_round = 4):
         self.population_size = population_size
         self.space = search_space
         self.evaluator = evaluator
         self.guidance = guidance
         self.mutation_rate = mutation_rate
         self.members = []
+        self.elite_size = elite_size
+        self.selector = selector
+        self.survivors = survivors
+        self.candidates_per_round = candidates_per_round
         
         self.data = {
                 "generation" : [],
-                "code" : [],
-                "validation_accuracy" : [],
-                "test_accuracy" : [],
-                "training_time" : [],
-                "train_accuracy" : [],
-                "parameters" : [],
+                "representation" : [],
+                "fitness" : [],
             }
             
         self.config = {
-            "population_size" : None,
+            "population_size" : self.population_size,
             "generations" : None,
-            "mutation_rate" : None,
-            "elite_size" : None,
-            "edge_limit" : self.edge_limit,
-            "layer_limit" : self.layer_limit,
-            "selection" : None,
+            "mutation_rate" : self.mutation_rate,
+            "elite_size" : self.elite_size,
+            "edge_limit" : self.space.edge_limit,
+            "layer_limit" : self.space.layer_limit,
+            "selection" : self.selector,
             "best_val_acc" : 0,
-            "best_genome" : None,
-            "best_operation" : None,
+            "best_candidate" : None,
         }
 
     def initialize(self):
@@ -453,46 +461,43 @@ class Population:
             c1, c2 = self.space.guided_crossover(parent1, parent2, self.guidance)
         return c1, c2
 
-    def mutation(self, genome, avail_ops, chance=0.05):
+    def mutation(self, genome):
         # Vanilla mutation
-        if self.bit_guidance is None:
-            return self.space.vanilla_mutation(genome, avail_ops, chance)
+        if self.guidance is None:
+            return self.space.vanilla_mutation(genome, self.space.operations, self.mutation_rate)
         else:
-            return self.space.guided_mutation(genome, avail_ops, self.guidance)
+            return self.space.guided_mutation(genome, self.space.operations, self.guidance)
 
-    def evolve(self, operations, generation,
-                elite_size = 2, selector = "tournament", survivors = 1,
-                candidates_per_round = 4):
-
-        # Config should be added once to save a bit of time
+    def evolve(self, generation = 1):
+        """
+        Evolution loop, including selection, crossover and mutation
+        """
         self.config["generations"] = generation
-        # if generation == 1:
-        #     self.config["mutation_rate"] = self.mutation_rate
-        #     self.config["elite_size"] = elite_size
-        #     self.config["selection"] = selector
+        next_generation = self.elitism(self.elite_size)
+        print(f"Generation {generation}")
 
-        next_generation = self.elitism(elite_size)
-        # print("varying genes...")
         while len(next_generation) < self.population_size:
             while True:
-                parent1 = self.selection(selector, survivors, candidates_per_round)[0]
-                parent2 = self.selection(selector, survivors, candidates_per_round)[0]
+                parent1 = self.selection(self.selector, self.survivors, self.candidates_per_round)[0]
+                parent2 = self.selection(self.selector, self.survivors, self.candidates_per_round)[0]
 
                 if parent1 is not parent2:
                     break
 
+            # print("crossover attempt")
             child1, child2 = self.crossover(parent1, parent2)
 
             if child1 is None and child2 is None:
                 continue
 
-            child1 = self.mutation(child1, self.space.operations, self.mutation_rate)
-            child2 = self.mutation(child2, self.space.operations, self.mutation_rate)
+            print("mutation attempt")
+            child1_mut = self.mutation(child1)
+            child2_mut = self.mutation(child2)
 
             # print(child1)
             # print(child2)
 
-            for child in (child1, child2):
+            for child in (child1_mut, child2_mut):
                 self.single_evaluation(child)
 
                 if len(next_generation) < self.population_size:
@@ -511,8 +516,7 @@ class Population:
         best = max(self.members, key = lambda g: g.fitness)
 
         self.config["best_val_acc"] = best.fitness
-        self.config["best_genome"] = best.code
-        self.config["best_operation"] = best.operations
+        self.config["best_candidate"] = best.representation
 
         for m in self.members:
 
@@ -528,6 +532,27 @@ class Population:
                 if name == "fitness":
                     continue
                 self.data.setdefault(name, []).append(value)
+
+        print("finished recording")
+
+class FeatureImportance(abstract.FeatureImportance):
+    def __init__(self, search_space):
+        self.space = search_space
+
+    def extract_data(self, population_data, search_space):
+        """
+        population_data must only have genome representation, fitness and generation
+        """
+        valid = population_data["fitness"]
+        reps = population_data["representation"]
+
+        for name, value in reps.items():
+            
+
+class Guidance:
+    def __init__(self, search_space):
+        pass
+
 
 def flatten_code(code):
     return list(code.replace("-", ""))
@@ -689,9 +714,17 @@ def parse_out(path_dir : Path, run_res : dict, eval_res : dict):
 # testing ground
     
 if __name__ == "__main__":
+
+    # records = Path('./datas/nasbench_full.tfrecord')
+    records = './datas/nasbench_full.tfrecord'
     
     space = NASBench101Space()
-    evaluator = NASBench101Evaluator()
-    pop = Population(100, space, evaluator)
+    evaluator = NASBench101Evaluator(records, space)
+    pop = Population(10, space, evaluator)
+    print("initializing...")
     pop.initialize()
     pop.evolve()
+
+    print("data: ", pop.data)
+
+    print("config: ", pop.config)
