@@ -59,7 +59,8 @@ class NASBench101Evaluator(abstract.Evaluator):
             }
 
 class NASBench101Space(abstract.SearchSpace):
-    def __init__(self, layer_limit=7, edge_limit=7, operations=None):
+    def __init__(self, layer_limit=7, edge_limit=7, operations=None,
+                 alpha = 4, beta = 4):
 
         self.layer_limit = layer_limit
         self.edge_limit = edge_limit
@@ -73,6 +74,9 @@ class NASBench101Space(abstract.SearchSpace):
 
         self.operations = operations
         self.actual_layers = layer_limit - 2
+        
+        for i in range(self.layer_limit - 2):
+            self.data[f"layer {i+1}"] = []
 
     def random_genome(self):
         ops = random_operation(self.layer_limit, self.operations)
@@ -96,9 +100,8 @@ class NASBench101Space(abstract.SearchSpace):
             if valid:
                 return GenomeNB101(code, ops)
 
-    def validate(self, genome):
-        matrix = string_to_matrix(genome.code)
-
+    def validate(self, code):
+        matrix = string_to_matrix(code)
         return valid_architecture(matrix, self.edge_limit)
 
     def decode(self, genome):
@@ -161,8 +164,8 @@ class NASBench101Space(abstract.SearchSpace):
             child1_code = '-'.join(genome1[:gen_cut] + genome2[gen_cut:])
             child2_code = '-'.join(genome2[:gen_cut] + genome1[gen_cut:])
         
-            valid1, reason1 = valid_architecture(string_to_matrix(child1_code), self.edge_limit)
-            valid2, reason2 = valid_architecture(string_to_matrix(child2_code), self.edge_limit)
+            valid1, reason1 = self.validate(child1_code)
+            valid2, reason2 = self.validate(child2_code)
         
             if not valid1:
                 invalids[reason1] += 1
@@ -205,7 +208,6 @@ class NASBench101Space(abstract.SearchSpace):
         
         f1, f2 = parent1.fitness, parent2.fitness
         base_parents = f1 / (f1 + f2)
-        # Exclude IO
         
         for attempt in range(MAX_PAIR_RETRIES):
             c1, c2 = [], []
@@ -225,8 +227,8 @@ class NASBench101Space(abstract.SearchSpace):
             child1_code = rebuild_code(c1, self.actual_layers + 1)
             child2_code = rebuild_code(c2, self.actual_layers + 1)
         
-            valid1, reason1 = valid_architecture(string_to_matrix(child1_code), self.edge_limit)
-            valid2, reason2 = valid_architecture(string_to_matrix(child2_code), self.edge_limit)
+            valid1, reason1 = self.validate(child1_code)
+            valid2, reason2 = self.validate(child2_code)
         
             if not valid1:
                 invalids[reason1] += 1
@@ -246,6 +248,7 @@ class NASBench101Space(abstract.SearchSpace):
             return None, None
 
         # Operation crossover
+        # Exclude IO
         ops1 = parent1.operations[1:-1]
         ops2 = parent2.operations[1:-1]
 
@@ -283,7 +286,7 @@ class NASBench101Space(abstract.SearchSpace):
                     if random.random() < chance:
                         pre_code[p] = '0' if pre_code[p] == '1' else '1'
             new_code = ''.join(pre_code)
-            valid, reason = valid_architecture(string_to_matrix(new_code), self.edge_limit)
+            valid, reason = self.validate(new_code)
         
             if valid:
                 break
@@ -323,7 +326,7 @@ class NASBench101Space(abstract.SearchSpace):
                 if pre_code[p] in ('0', '1') and random.random() < guidance.get_prob_bit(p + 1):
                     pre_code[p] = '0' if pre_code[p] == '1' else '1'
             new_code = rebuild_code(pre_code, self.actual_layers + 1)
-            valid, reason = valid_architecture(string_to_matrix(new_code), self.edge_limit)
+            valid, reason = self.validate(new_code)
             if valid:
                 break
             else:
@@ -356,20 +359,37 @@ class NASBench101Space(abstract.SearchSpace):
 class Population:
     """General population for all NASes (maybe)"""
 
-    def __init__(
-        self,
-        population_size,
-        search_space,
-        evaluator,
-        guidance=None,
-        mutation_rate=0.05
-    ):
+    def __init__(self, population_size, search_space, evaluator,
+                 guidance=None, mutation_rate=0.05):
         self.population_size = population_size
         self.space = search_space
         self.evaluator = evaluator
         self.guidance = guidance
         self.mutation_rate = mutation_rate
         self.members = []
+        
+        self.data = {
+                "generation" : [],
+                "code" : [],
+                "validation_accuracy" : [],
+                "test_accuracy" : [],
+                "training_time" : [],
+                "train_accuracy" : [],
+                "parameters" : [],
+            }
+            
+        self.config = {
+            "population_size" : None,
+            "generations" : None,
+            "mutation_rate" : None,
+            "elite_size" : None,
+            "edge_limit" : self.edge_limit,
+            "layer_limit" : self.layer_limit,
+            "selection" : None,
+            "best_val_acc" : 0,
+            "best_genome" : None,
+            "best_operation" : None,
+        }
 
     def initialize(self):
         if self.guidance is None:
@@ -380,7 +400,7 @@ class Population:
         self.evaluation()
         self.record(0)
 
-    # __repr__ return string, so if the list is done, it will print None, cause error
+    # __repr__ return string, so if the list is done, it will print None, causing error
     def __repr__(self):
         return '\n'.join(str(member) for member in self.members)
 
@@ -390,6 +410,11 @@ class Population:
 
             genome.metrics = res
             genome.fitness = res["fitness"]
+            
+    def single_evaluation(self, child):
+        res = self.evaluator.evaluate(child)
+        child.metrics = res
+        child.fitness = res["fitness"]
 
     def selection(self, method = "tournament", survivors = 1, tournament_size = 4):
         '''
@@ -441,10 +466,10 @@ class Population:
 
         # Config should be added once to save a bit of time
         self.config["generations"] = generation
-        if generation == 1:
-            self.config["mutation_rate"] = self.mutation_rate
-            self.config["elite_size"] = elite_size
-            self.config["selection"] = selector
+        # if generation == 1:
+        #     self.config["mutation_rate"] = self.mutation_rate
+        #     self.config["elite_size"] = elite_size
+        #     self.config["selection"] = selector
 
         next_generation = self.elitism(elite_size)
         # print("varying genes...")
@@ -461,16 +486,14 @@ class Population:
             if child1 is None and child2 is None:
                 continue
 
-            child1 = self.mutation(child1, operations, self.mutation_rate)
-            child2 = self.mutation(child2, operations, self.mutation_rate)
+            child1 = self.mutation(child1, self.space.operations, self.mutation_rate)
+            child2 = self.mutation(child2, self.space.operations, self.mutation_rate)
 
             # print(child1)
             # print(child2)
 
             for child in (child1, child2):
-                res = self.evaluator.evaluate(child)
-                child.metrics = res
-                child.fitness = res["validation_accuracy"]
+                self.single_evaluation(child)
 
                 if len(next_generation) < self.population_size:
                     next_generation.append(child)
@@ -479,15 +502,12 @@ class Population:
 
         for genome in self.members:
             if genome.fitness is None:
-                res = self.evaluator.evaluate(genome)
-                genome.metrics = res
-                genome.fitness = res["validation_accuracy"]
+                self.single_evaluation(genome)
 
         self.record(generation)
 
     def record(self, generation):
         print(f"recording generation {generation}")
-        layer_patterns = Counter()
         best = max(self.members, key = lambda g: g.fitness)
 
         self.config["best_val_acc"] = best.fitness
@@ -496,24 +516,18 @@ class Population:
 
         for m in self.members:
 
-            layers = m.operations[1:-1]
-            metrics = m.metrics
-
-            layer_patterns[tuple(layers)] += 1
-
             self.data["generation"].append(generation)
-            self.data["code"].append(m.code)
-            self.data["validation_accuracy"].append(metrics["validation_accuracy"])
-            self.data["test_accuracy"].append(metrics["test_accuracy"])
-            self.data["training_time"].append(metrics["training_time"])
-            self.data["train_accuracy"].append(metrics["train_accuracy"])
-            self.data["parameters"].append(metrics["trainable_parameters"])
-
-            for i in range(len(layers)):
-                self.data[f"layer {i+1}"].append(layers[i])
-
-        # for pattern, count in layer_patterns.items():
-        #     print(count, pattern)
+            features = self.space.feature_data(m)
+            
+            for name, value in features.items():
+                if name not in self.data:
+                    self.data[name] = []
+                self.data.setdefault(name, []).append(value)
+                
+            for name, value in m.metrics.items():
+                if name == "fitness":
+                    continue
+                self.data.setdefault(name, []).append(value)
 
 def flatten_code(code):
     return list(code.replace("-", ""))
@@ -671,3 +685,13 @@ def parse_out(path_dir : Path, run_res : dict, eval_res : dict):
 
     with open(path_dir / "config.json", "w") as c:
         json.dump(cfg, c, indent=4)
+    
+# testing ground
+    
+if __name__ == "__main__":
+    
+    space = NASBench101Space()
+    evaluator = NASBench101Evaluator()
+    pop = Population(100, space, evaluator)
+    pop.initialize()
+    pop.evolve()
