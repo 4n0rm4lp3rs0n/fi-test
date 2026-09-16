@@ -157,8 +157,14 @@ class NASBench101Space(abstract.SearchSpace):
         
             gen_cut = random.randint(1, len(genome1) - 1)
         
-            child1_code = '-'.join(genome1[:gen_cut] + genome2[gen_cut:])
-            child2_code = '-'.join(genome2[:gen_cut] + genome1[gen_cut:])
+            # child1_code = '-'.join(genome1[:gen_cut] + genome2[gen_cut:])
+            # child2_code = '-'.join(genome2[:gen_cut] + genome1[gen_cut:])
+            
+            child1_code = rebuild_code(genome1[:gen_cut] + genome2[gen_cut:], self.actual_layers + 1)
+            child2_code = rebuild_code(genome2[:gen_cut] + genome1[gen_cut:], self.actual_layers + 1)
+            
+            # print(f"child 1: {child1_code}")
+            # print(f"child 2: {child2_code}")
         
             valid1, reason1 = self.validate(child1_code)
             valid2, reason2 = self.validate(child2_code)
@@ -179,8 +185,8 @@ class NASBench101Space(abstract.SearchSpace):
 
         # print("total attempts: ", attempt)
 
-        print(invalids)
-        input()
+        # print(invalids)
+        # input()
 
         # Children are still invalid after too many crossovers
         if not success:
@@ -521,38 +527,90 @@ class Population:
         for m in self.members:
 
             self.data["generation"].append(generation)
+            self.data["representation"].append(m.representation)
             features = self.space.feature_data(m)
             
-            for name, value in features.items():
-                if name not in self.data:
-                    self.data[name] = []
-                self.data.setdefault(name, []).append(value)
+            # for name, value in features.items():
+            #     if name not in self.data:
+            #         self.data[name] = []
+            #     self.data.setdefault(name, []).append(value)
                 
-            for name, value in m.metrics.items():
-                if name == "fitness":
-                    continue
-                self.data.setdefault(name, []).append(value)
+            # for name, value in m.metrics.items():
+            #     if name == "fitness":
+            #         continue
+            #     self.data.setdefault(name, []).append(value)
 
         print("finished recording")
 
 class FeatureImportance(abstract.FeatureImportance):
     def __init__(self, search_space):
         self.space = search_space
+        self.data = None
 
     def extract_data(self, population_data, search_space):
         """
         population_data must only have genome representation, fitness and generation
         """
-        valid = population_data["fitness"]
-        reps = population_data["representation"]
-
-        for name, value in reps.items():
+        rows = []
+        for rep, fitness in zip(population_data["representation"], population_data["fitness"]):
+            row = {"fitness" : fitness}
+            self._extract_rep(rep, row)
+            rows.append(row)
             
+        self.data = pd.DataFrame(rows)
+        return pd.DataFrame(rows)
+
+    def _extract_rep(self, value, row, prefix = ""):
+        # dict
+        if isinstance(value, dict):
+            for name, part in value.items():
+                new_pref = (f"{prefix}_{name}" if prefix else name)
+                self._extract_rep(part, row, new_pref)
+        # list / tuple
+        if isinstance(value, (list, tuple)):
+            # empty
+            if not value:
+                return
+            # numeric
+            if all(self._is_num(x) for x in value):
+                for i, x in enumerate(value, start = 1):
+                    row[f"{prefix}{i}"] = x
+            
+            # string / cat
+            else:
+                for i, x in enumerate(value, start = 1):
+                    row[f"{prefix}{i}"] = x
+        # string
+        elif isinstance(value, str):
+            # binary rep
+            if self._is_bin_str(value):
+                bits = [char for char in value if char in ("0", "1")]
+                for i, bit in enumerate(bits, start = 1):
+                    row[f"{prefix}_bit{i}"] = int(bit)
+            # cat scalar
+            else:
+                row[prefix] = value
+        
+        # num scalar
+        elif self._is_num(value):
+            row[prefix] = value
+        # others
+        else:
+            row[prefix] = value
+        
+    @staticmethod
+    def _is_num(value):
+        return isinstance(value, (int, float, np.integer, np.floating))
+    
+    @staticmethod
+    def _is_bin_str(value):
+        chars = [char for char in value if not char.isspace()]
+        return (len(chars) > 0 and all(char in "01-" for char in chars) and any(char in "01" for char in chars))
 
 class Guidance:
     def __init__(self, search_space):
         pass
-
+        
 
 def flatten_code(code):
     return list(code.replace("-", ""))
@@ -720,7 +778,7 @@ if __name__ == "__main__":
     
     space = NASBench101Space()
     evaluator = NASBench101Evaluator(records, space)
-    pop = Population(10, space, evaluator)
+    pop = Population(100, space, evaluator)
     print("initializing...")
     pop.initialize()
     pop.evolve()
