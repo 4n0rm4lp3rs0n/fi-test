@@ -129,9 +129,9 @@ class FeatureImportance(ABC):
         """
         pass
 
-    @abstractmethod
-    def calculate(self, data):
-        """
-        Calculate importance/effect statistics.
-        """
-        pass
+    # @abstractmethod
+    # def calculate(self, data):
+    #     """
+    #     Calculate importance/effect statistics.
+    #     """
+    #     pass

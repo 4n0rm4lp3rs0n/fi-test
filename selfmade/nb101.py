@@ -11,6 +11,13 @@ from collections import Counter
 import json
 import selfmade.abstract as abstract
 
+from sklearn.preprocessing import LabelEncoder
+from sklearn.inspection import permutation_importance
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_absolute_error
+
 from time import time
 
 # GLOBAL PARAMETERS
@@ -412,6 +419,9 @@ class Population:
             self.members = [self.space.guided_genome(self.guidance) for _ in range(self.population_size)]
 
         self.evaluation()
+        best = max(self.members, key=lambda g: g.fitness)
+        
+        print(f"Best performance: {best.fitness}")
         self.record(0)
 
     # __repr__ return string, so if the list is done, it will print None, causing error
@@ -479,45 +489,52 @@ class Population:
         Evolution loop, including selection, crossover and mutation
         """
         self.config["generations"] = generation
-        next_generation = self.elitism(self.elite_size)
-        print(f"Generation {generation}")
 
-        while len(next_generation) < self.population_size:
-            while True:
-                parent1 = self.selection(self.selector, self.survivors, self.candidates_per_round)[0]
-                parent2 = self.selection(self.selector, self.survivors, self.candidates_per_round)[0]
+        for gen in range(1, generation + 1):
+            next_generation = self.elitism(self.elite_size)
+            print(f"Generation {gen}")
 
-                if parent1 is not parent2:
-                    break
+            while len(next_generation) < self.population_size:
+                while True:
+                    parent1 = self.selection(self.selector, self.survivors, self.candidates_per_round)[0]
+                    parent2 = self.selection(self.selector, self.survivors, self.candidates_per_round)[0]
 
-            # print("crossover attempt")
-            child1, child2 = self.crossover(parent1, parent2)
+                    if parent1 is not parent2:
+                        break
 
-            if child1 is None and child2 is None:
-                continue
+                # print("crossover attempt")
+                child1, child2 = self.crossover(parent1, parent2)
 
-            print("mutation attempt")
-            child1_mut = self.mutation(child1)
-            child2_mut = self.mutation(child2)
+                if child1 is None and child2 is None:
+                    continue
 
-            # print(child1)
-            # print(child2)
+                # print("mutation attempt")
+                child1_mut = self.mutation(child1)
+                child2_mut = self.mutation(child2)
 
-            for child in (child1_mut, child2_mut):
-                self.single_evaluation(child)
+                # print(child1)
+                # print(child2)
 
-                if len(next_generation) < self.population_size:
-                    next_generation.append(child)
+                for child in (child1_mut, child2_mut):
+                    self.single_evaluation(child)
 
-        self.members = next_generation
+                    if len(next_generation) < self.population_size:
+                        next_generation.append(child)
 
-        for genome in self.members:
-            if genome.fitness is None:
-                self.single_evaluation(genome)
+            self.members = next_generation
 
-        self.record(generation)
+            for genome in self.members:
+                if genome.fitness is None:
+                    self.single_evaluation(genome)
+
+            best = max(self.members, key=lambda g: g.fitness)
+
+            print(f"Best performance: {best.fitness}")
+
+            self.record(gen)
 
     def record(self, generation):
+        """Record all candidates into pop.data"""
         print(f"recording generation {generation}")
         best = max(self.members, key = lambda g: g.fitness)
 
@@ -528,17 +545,7 @@ class Population:
 
             self.data["generation"].append(generation)
             self.data["representation"].append(m.representation)
-            features = self.space.feature_data(m)
-            
-            # for name, value in features.items():
-            #     if name not in self.data:
-            #         self.data[name] = []
-            #     self.data.setdefault(name, []).append(value)
-                
-            # for name, value in m.metrics.items():
-            #     if name == "fitness":
-            #         continue
-            #     self.data.setdefault(name, []).append(value)
+            self.data["fitness"].append(m.fitness)
 
         print("finished recording")
 
@@ -547,18 +554,18 @@ class FeatureImportance(abstract.FeatureImportance):
         self.space = search_space
         self.data = None
 
-    def extract_data(self, population_data, search_space):
+    def extract_data(self, population_data):
         """
-        population_data must only have genome representation, fitness and generation
+        population_data must contain genome representation and fitness
         """
         rows = []
         for rep, fitness in zip(population_data["representation"], population_data["fitness"]):
             row = {"fitness" : fitness}
             self._extract_rep(rep, row)
             rows.append(row)
-            
+
         self.data = pd.DataFrame(rows)
-        return pd.DataFrame(rows)
+        return self.data
 
     def _extract_rep(self, value, row, prefix = ""):
         # dict
@@ -567,7 +574,7 @@ class FeatureImportance(abstract.FeatureImportance):
                 new_pref = (f"{prefix}_{name}" if prefix else name)
                 self._extract_rep(part, row, new_pref)
         # list / tuple
-        if isinstance(value, (list, tuple)):
+        elif isinstance(value, (list, tuple)):
             # empty
             if not value:
                 return
@@ -606,6 +613,214 @@ class FeatureImportance(abstract.FeatureImportance):
     def _is_bin_str(value):
         chars = [char for char in value if not char.isspace()]
         return (len(chars) > 0 and all(char in "01-" for char in chars) and any(char in "01" for char in chars))
+
+    def encode(self):
+        encoders = {}
+        df = self.data.copy()
+        y = self.data["fitness"].copy()
+        X = df.drop(columns=["fitness"]).copy()
+
+        for c in X.columns:
+            if pd.api.types.is_numeric_dtype(X[c]):
+                continue
+            le = LabelEncoder()
+            X[c] = le.fit_transform(X[c].astype(str))
+            encoders[c] = le
+        self.data = pd.concat([X,y], axis = 1)
+        if encoders:
+            self.encoders = encoders
+        return X, y, self.encoders
+
+    def get_importance(self, model):
+        # Encode
+        _, _, _ = self.encode()
+
+        df = self.data.copy()
+
+        # Remove constants
+        constant_cols = [
+            c for c in df.columns
+            if c != "fitness" and df[c].nunique(dropna=True) <= 1
+        ]
+
+        df = df.drop(columns=constant_cols)
+
+        y = df["fitness"]
+        X = df.drop(columns = ["fitness"]).copy()
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+        model.fit(X_train, y_train)
+        pred = model.predict(X_test)
+
+        r2 = r2_score(y_test, pred)
+        mae = mean_absolute_error(y_test, pred)
+
+        if hasattr(model, "feature_importances_"):
+            importance = model.feature_importances_
+        else:
+            importance = None
+        
+        importance_df = pd.DataFrame({
+            "feature": X.columns,
+            "importance": importance
+        }).sort_values("importance", ascending=False).reset_index(drop = True)
+        
+        perm = permutation_importance(
+            model, X_test, y_test, n_repeats=10,
+            random_state=42, n_jobs=1)
+
+        perm_df = pd.DataFrame({
+                "feature": X.columns,
+                "importance": perm.importances_mean,
+                "std": perm.importances_std
+                }).sort_values("importance", ascending=False).reset_index(drop=True)
+                    
+        self.r2 = r2
+        self.mae = mae
+        self.imp_df = importance_df
+        self.perm = perm_df
+
+        return {"df_imp" : importance_df, "perm_imp" : perm_df, "r2": r2, "mae" : mae}
+        
+    def calculate_effect(self, feature, feature_type):
+        x = self.data[feature]
+        y = self.data["fitness"]
+        if feature_type == "binary":
+            return self._bin_eff(x, y)
+        elif feature_type == "categorical":
+            return self._cat_eff(x, y)
+        else:
+            raise ValueError(f"{feature_type} not existed in {feature}")
+        
+    def _bin_eff(self, x, y):
+        states = sorted(x.dropna().unique())
+
+        if states != [0,1]:
+            raise ValueError(f"Binary feature must contain 0 or 1, got {states}")
+
+        y0 = y[x == 0]
+        y1 = y[x == 1]
+
+        mean_0 = y0.mean()
+        mean_1 = y1.mean()
+
+        delta = mean_1 - mean_0
+        return {"type" : "binary",
+                "states" : states,
+                "n_states" : len(states),
+                "means" : {0 : mean_0, 1 : mean_1},
+                "effect" : delta,
+                "preferred" : 1 if delta > 0 else 0
+                }
+
+    def _cat_eff(self, x, y):
+        states = list(x.dropna().unique())
+        overall_mean = y.mean()
+
+        means = {}
+
+        for state in states:
+            means[state] = y[x == state].mean()
+
+        effects = {
+            state: mean - overall_mean
+            for state, mean in means.items()
+        }
+
+        preferred = max(effects, key=effects.get)
+        spread = max(effects.values()) - min(effects.values())
+
+        return {
+            "type": "categorical",
+            "states": states,
+            "n_states": len(states),
+            "means": means,
+            "effects": effects,
+            "preferred": preferred,
+            "spread": spread
+        }
+
+    def label_check(self, feature):
+        state = self.data[feature].dropna().unique()
+        if set(state).issubset({0, 1}):
+            return "binary"
+        if len(state) <= 1:
+            return "constant"
+        return "categorical"
+
+    def calculate_effects(self):
+        effects = {}
+        for feature in self.data.columns:
+            if feature == "fitness":
+                continue
+            feature_type = self.label_check(feature)
+            if feature_type == "constant":
+                continue
+            effects[feature] = self.calculate_effect(feature, feature_type)
+        return effects
+
+    def make_effect_reports(self):
+
+        effects = self.calculate_effects()
+
+        directions = {}
+        tendencies = {}
+
+        for feature, result in effects.items():
+
+            if result["type"] == "binary":
+                directions[feature] = result
+
+            elif result["type"] == "categorical":
+                tendencies[feature] = result
+
+        return directions, tendencies
+
+    def pipeline(self, pop_data, model):
+
+        # 1. Extract
+        self.extract_data(pop_data)
+
+        # 2. Calculate effects
+        directions, tendencies = self.make_effect_reports()
+
+        # 3. Model-based importance
+        self.encode()
+        importance = self.get_importance(model)
+
+        # 4. Convert reports to DataFrames
+        direction_rows = []
+        for feature, result in directions.items():
+            direction_rows.append({
+                "feature": feature,
+                "mean_0": result["means"][0],
+                "mean_1": result["means"][1],
+                "direction": result["effect"],
+                "preferred": result["preferred"]
+            })
+
+        direction_df = pd.DataFrame(direction_rows)
+
+        tendency_rows = []
+        for feature, result in tendencies.items():
+            for state, effect in result["effects"].items():
+                tendency_rows.append({
+                    "feature": feature,
+                    "state": state,
+                    "mean_fitness": result["means"][state],
+                    "effect": effect,
+                    "preferred": state == result["preferred"],
+                    "spread": result["spread"]
+                })
+
+        tendency_df = pd.DataFrame(tendency_rows)
+
+        return {
+            "importance": importance,
+            "direction": direction_df,
+            "tendency": tendency_df
+        }
 
 class Guidance:
     def __init__(self, search_space):
@@ -781,8 +996,11 @@ if __name__ == "__main__":
     pop = Population(100, space, evaluator)
     print("initializing...")
     pop.initialize()
-    pop.evolve()
+    pop.evolve(generation=2)
 
-    print("data: ", pop.data)
+    data = pd.DataFrame(pop.data)
+    # cfg = pd.DataFrame(pop.config)
 
-    print("config: ", pop.config)
+    data.to_csv("data.csv")
+    # cfg.to_csv("cfg.csv")
+    print(pop.config)
