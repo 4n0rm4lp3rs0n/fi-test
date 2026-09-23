@@ -13,7 +13,7 @@ import selfmade.abstract as abstract
 
 from sklearn.preprocessing import LabelEncoder
 from sklearn.inspection import permutation_importance
-
+from scipy.stats import spearmanr
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error
@@ -64,7 +64,7 @@ class NASBench101Evaluator(abstract.Evaluator):
             }
 
 class NASBench101Space(abstract.SearchSpace):
-    def __init__(self, layer_limit=7, edge_limit=7, operations=None,
+    def __init__(self, layer_limit= 7, edge_limit= 9, operations=None,
                  alpha = 4, beta = 4):
 
         self.layer_limit = layer_limit
@@ -669,6 +669,8 @@ class FeatureImportance(abstract.FeatureImportance):
         perm = permutation_importance(
             model, X_test, y_test, n_repeats=10,
             random_state=42, n_jobs=1)
+        
+        corr, p_val = spearmanr(importance, perm.importances_mean)
 
         perm_df = pd.DataFrame({
                 "feature": X.columns,
@@ -681,7 +683,7 @@ class FeatureImportance(abstract.FeatureImportance):
         self.imp_df = importance_df
         self.perm = perm_df
 
-        return {"df_imp" : importance_df, "perm_imp" : perm_df, "r2": r2, "mae" : mae}
+        return {"df_imp" : importance_df, "perm_imp" : perm_df, "r2": r2, "mae" : mae, "corr": corr, "p_value": p_val}
         
     def calculate_effect(self, feature, feature_type):
         x = self.data[feature]
@@ -692,6 +694,14 @@ class FeatureImportance(abstract.FeatureImportance):
             return self._cat_eff(x, y)
         else:
             raise ValueError(f"{feature_type} not existed in {feature}")
+        
+    def get_feature_types(self):
+        feature_types = {}
+        for feature in self.data.columns:
+            if feature == "fitness":
+                continue
+            feature_types[feature] = self.label_check(feature)
+        return feature_types
         
     def _bin_eff(self, x, y):
         states = sorted(x.dropna().unique())
@@ -706,12 +716,26 @@ class FeatureImportance(abstract.FeatureImportance):
         mean_1 = y1.mean()
 
         delta = mean_1 - mean_0
+        
+        std_1 = y1.std()
+        std_0 = y0.std()
+        
+        pooled_std = np.sqrt((std_1**2 + std_0**2) / 2)
+
+        if pooled_std == 0 or np.isnan(pooled_std):
+            strength = 0
+        else:
+            strength = abs(delta) / pooled_std
+            
         return {"type" : "binary",
                 "states" : states,
                 "n_states" : len(states),
                 "means" : {0 : mean_0, 1 : mean_1},
                 "effect" : delta,
-                "preferred" : 1 if delta > 0 else 0
+                "preferred" : 1 if delta > 0 else 0,
+                "std_1": std_1,
+                "std_0": std_0,
+                "strength": strength
                 }
 
     def _cat_eff(self, x, y):
@@ -782,7 +806,8 @@ class FeatureImportance(abstract.FeatureImportance):
         # 1. Extract
         self.extract_data(pop_data)
 
-        # 2. Calculate effects
+        # 2. Get feature types and calculate effects
+        feature_types = self.get_feature_types()
         directions, tendencies = self.make_effect_reports()
 
         # 3. Model-based importance
@@ -819,12 +844,133 @@ class FeatureImportance(abstract.FeatureImportance):
         return {
             "importance": importance,
             "direction": direction_df,
-            "tendency": tendency_df
+            "tendency": tendency_df,
+            "feature_types": feature_types,
         }
 
 class Guidance:
-    def __init__(self, search_space):
-        pass
+    
+    def __init__(self, search_space, importance_data, config, alpha = 4, beta = 4, eps = 1e-3):
+        self.space = search_space
+        self.fi = importance_data["importance"]
+        self.direction = importance_data["direction"]
+        self.tendency = importance_data["tendency"]
+        self.feature_types = importance_data["feature_types"]
+        self.alpha = alpha
+        self.beta = beta
+        self.eps = eps
+        self.r2 = self.fi["r2"]
+        self.mae = self.fi["mae"]
+        self.corr = self.fi["corr"]
+        self.p_val = self.fi["p_value"]
+        self.layer_limit = config["layer_limit"]
+        self.edge_limit = config["edge_limit"]
+        self.mrate = config["mutation_rate"]
+        
+        sbit = self.layer_limit * (self.layer_limit - 1) // 2
+        if self.edge_limit is not None and 0 <= self.edge_limit <= sbit:
+            self.sparsity_rate = np.clip(self.edge_limit / sbit, 1e-6, 1 - 1e-6)
+        else:
+            self.sparsity_rate = 0.5
+
+        self.G = np.clip(self.r2 * abs(self.corr) * (1 - self.p_val) / (1 + self.mae), 0, 1)
+        self.kappa = np.clip(self.r2, 0.0, 1.0)
+        
+    def sortNsplit(self):
+        df = self.fi["df_imp"].copy()
+
+        # Extract family and numerical position
+        extracted = df["feature"].str.extract(r"^([A-Za-z_]+)\s*(\d+)$")
+
+        df["family"] = extracted[0]
+        df["position"] = pd.to_numeric(extracted[1], errors="coerce")
+
+        # Get type from FeatureImportance
+        df["type"] = df["feature"].map(self.feature_types)
+
+        # Check that every feature got a type
+        if df["type"].isna().any():
+            unknown = df.loc[df["type"].isna(), "feature"].tolist()
+            raise ValueError(f"No feature type found for: {unknown}")
+
+        # Group by family + type
+        groups = {}
+
+        for (family, feature_type), group in df.groupby(["family", "type"], sort=True):
+            group = (group.sort_values("position",ascending=True).reset_index(drop=True))
+            groups[(family, feature_type)] = group
+            
+        self.groups = groups
+
+        return groups
+        
+    def calc_bit_guidance(self):
+            # Cross usage
+            imp_bit = self.fi[self.fi["feature"].str.startswith("bit")].copy()
+            # init phase
+            i_norm = imp_bit["importance"] / imp_bit["importance"].max()
+            direction = self.bitgui["direction"].fillna(0.0)
+            strength = self.bitgui["direction_strength"].fillna(0.0)
+            logit0 = np.log(self.sparsity_rate / (1 - self.sparsity_rate))
+    
+            g = np.sign(direction) * np.tanh(strength) * i_norm.to_numpy()
+            p_gui = 1 / (1 + np.exp(-(logit0 + self.alpha * self.G * g)))
+            self.p_final_bits = list((1 - self.mrate) * p_gui + self.mrate * 0.5)
+    
+            # variance phase
+            i_share = imp_bit["importance"] / imp_bit["importance"].sum()
+            i_rel = i_share / i_share.max()
+    
+            self.b_star = (self.bitgui["direction"] > 0).astype(int).to_numpy()
+    
+            d_hat = self.bitgui["direction_strength"] / self.bitgui["direction_strength"].max()
+    
+            self.i_share_bit = i_share.to_numpy()
+    
+            s_bit = (i_rel.to_numpy() + d_hat.to_numpy()) / 2
+            self.bit_mutation_prob = self.mrate * ((1 - self.kappa) + self.kappa * (1-s_bit))
+        
+    def calc_layer_guidance(self):
+        # cross usage
+        imp_layer = self.fi[self.fi["feature"].str.startswith("layer")].copy()
+        imp_layer["pos"] = imp_layer["feature"].str.replace("layer ", "").astype(int)
+        imp_layer = imp_layer.set_index("pos").sort_index()
+
+        self.layergui.columns = [int(c.replace("layer ", "")) for c in self.layergui.columns]
+
+        # init phase
+        # i_norm = imp_layer["importance"] / imp_layer["importance"].max()
+        self.prob_layers = {}
+        imp_layer["I_norm"] = imp_layer["importance"] / imp_layer["importance"].max()
+        actual_ops = self.layer_limit - 2
+        
+        for j in range(1, actual_ops + 1):
+            col = f"layer {j}"
+            all_dist = self.population[col].value_counts(normalize=True)
+            tendency = self.layergui[j]
+            I_j = imp_layer.loc[imp_layer["feature"] == col, "I_norm"].values[0]
+            ops = all_dist.index
+
+            logits = np.array([np.log(all_dist[o] + self.eps) + self.beta * self.G * I_j * tendency.get(o, 0.0) for o in ops])
+            p_gui = np.exp(logits - logits.max())
+            p_gui /= p_gui.sum()
+
+            K = len(ops)
+            p_final_layers = (1 - self.mrate) * p_gui + self.mrate * (1/K)
+            self.prob_layers[col] = list(zip(ops, p_final_layers))
+
+        # variance phase
+        i_share = imp_layer["importance"] / imp_layer["importance"].sum()
+        i_rel = i_share / i_share.max()
+
+        self.i_share_layer = i_share.to_numpy()
+
+        spread = self.layergui.max() - self.layergui.min()
+        G_hat = (spread / spread.max()).reindex(range(1, self.layer_limit - 2 + 1))
+
+        s_layer = (i_rel.to_numpy() + G_hat.to_numpy()) / 2
+        self.layer_mutation_prob = self.mrate * ((1- self.kappa) + self.kappa * (1 - s_layer))
+    
         
 
 def flatten_code(code):
