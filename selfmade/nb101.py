@@ -550,6 +550,7 @@ class Population:
         print("finished recording")
 
 class FeatureImportance(abstract.FeatureImportance):
+    """Extract values from previous runs"""
     def __init__(self, search_space):
         self.space = search_space
         self.data = None
@@ -564,7 +565,8 @@ class FeatureImportance(abstract.FeatureImportance):
             self._extract_rep(rep, row)
             rows.append(row)
 
-        self.data = pd.DataFrame(rows)
+        self.raw_data = pd.DataFrame(rows)
+        self.data = self.raw_data.copy()
         return self.data
 
     def _extract_rep(self, value, row, prefix = ""):
@@ -733,8 +735,7 @@ class FeatureImportance(abstract.FeatureImportance):
                 "means" : {0 : mean_0, 1 : mean_1},
                 "effect" : delta,
                 "preferred" : 1 if delta > 0 else 0,
-                "std_1": std_1,
-                "std_0": std_0,
+                "std": {0: std_0, 1: std_1},
                 "strength": strength
                 }
 
@@ -753,7 +754,23 @@ class FeatureImportance(abstract.FeatureImportance):
         }
 
         preferred = max(effects, key=effects.get)
-        spread = max(effects.values()) - min(effects.values())
+        eff_spread = max(effects.values()) - min(effects.values())
+
+        threshold = y.quantile(0.8)
+        good_mask = y >= threshold
+
+        all_dist = x.value_counts(normalize=True)
+
+        good_dist = x[good_mask].value_counts(normalize=True)
+
+        tendency = good_dist.subtract(all_dist, fill_value=0.0)
+
+        tendency = {
+            state: tendency.get(state, 0.0)
+            for state in states
+        }
+
+        tendency_spread = (max(tendency.values()) - min(tendency.values()))
 
         return {
             "type": "categorical",
@@ -762,7 +779,9 @@ class FeatureImportance(abstract.FeatureImportance):
             "means": means,
             "effects": effects,
             "preferred": preferred,
-            "spread": spread
+            "effect_spread": eff_spread,
+            "tendency": {state: tendency.get(state, 0.0) for state in states},
+            "tendency_spread": tendency_spread,
         }
 
     def label_check(self, feature):
@@ -822,21 +841,26 @@ class FeatureImportance(abstract.FeatureImportance):
                 "mean_0": result["means"][0],
                 "mean_1": result["means"][1],
                 "direction": result["effect"],
-                "preferred": result["preferred"]
+                "preferred": result["preferred"],
+                "std_0": result["std"][0],
+                "std_1": result["std"][1],
+                "strength": result["strength"]
             })
 
         direction_df = pd.DataFrame(direction_rows)
 
         tendency_rows = []
         for feature, result in tendencies.items():
-            for state, effect in result["effects"].items():
+            for state in result["states"]:
                 tendency_rows.append({
                     "feature": feature,
                     "state": state,
                     "mean_fitness": result["means"][state],
-                    "effect": effect,
+                    "effect": result["effects"][state],
+                    "effect_spread": result["effect_spread"],
                     "preferred": state == result["preferred"],
-                    "spread": result["spread"]
+                    "tendency": result["tendency"][state],
+                    "tendency_spread": result["tendency_spread"]
                 })
 
         tendency_df = pd.DataFrame(tendency_rows)
@@ -846,9 +870,11 @@ class FeatureImportance(abstract.FeatureImportance):
             "direction": direction_df,
             "tendency": tendency_df,
             "feature_types": feature_types,
+            "population": self.raw_data.copy()
         }
 
 class Guidance:
+    """Shape the population to get better results"""
     
     def __init__(self, search_space, importance_data, config, alpha = 4, beta = 4, eps = 1e-3):
         self.space = search_space
@@ -856,6 +882,7 @@ class Guidance:
         self.direction = importance_data["direction"]
         self.tendency = importance_data["tendency"]
         self.feature_types = importance_data["feature_types"]
+        self.population = importance_data["population"]
         self.alpha = alpha
         self.beta = beta
         self.eps = eps
@@ -899,79 +926,171 @@ class Guidance:
         for (family, feature_type), group in df.groupby(["family", "type"], sort=True):
             group = (group.sort_values("position",ascending=True).reset_index(drop=True))
             groups[(family, feature_type)] = group
-            
-        self.groups = groups
 
         return groups
-        
-    def calc_bit_guidance(self):
-            # Cross usage
-            imp_bit = self.fi[self.fi["feature"].str.startswith("bit")].copy()
-            # init phase
-            i_norm = imp_bit["importance"] / imp_bit["importance"].max()
-            direction = self.bitgui["direction"].fillna(0.0)
-            strength = self.bitgui["direction_strength"].fillna(0.0)
-            logit0 = np.log(self.sparsity_rate / (1 - self.sparsity_rate))
-    
-            g = np.sign(direction) * np.tanh(strength) * i_norm.to_numpy()
-            p_gui = 1 / (1 + np.exp(-(logit0 + self.alpha * self.G * g)))
-            self.p_final_bits = list((1 - self.mrate) * p_gui + self.mrate * 0.5)
-    
-            # variance phase
-            i_share = imp_bit["importance"] / imp_bit["importance"].sum()
-            i_rel = i_share / i_share.max()
-    
-            self.b_star = (self.bitgui["direction"] > 0).astype(int).to_numpy()
-    
-            d_hat = self.bitgui["direction_strength"] / self.bitgui["direction_strength"].max()
-    
-            self.i_share_bit = i_share.to_numpy()
-    
-            s_bit = (i_rel.to_numpy() + d_hat.to_numpy()) / 2
-            self.bit_mutation_prob = self.mrate * ((1 - self.kappa) + self.kappa * (1-s_bit))
-        
-    def calc_layer_guidance(self):
-        # cross usage
-        imp_layer = self.fi[self.fi["feature"].str.startswith("layer")].copy()
-        imp_layer["pos"] = imp_layer["feature"].str.replace("layer ", "").astype(int)
-        imp_layer = imp_layer.set_index("pos").sort_index()
 
-        self.layergui.columns = [int(c.replace("layer ", "")) for c in self.layergui.columns]
+    def calculate_guidance(self):
+        self.groups = self.sortNsplit()
+        self.guides = {}
+
+        for (family, feature_type) in self.groups:
+            if feature_type == "binary":
+                res = self.calc_bit_guidance(self.groups[(family, feature_type)], family)
+            elif feature_type == "categorical":
+                res = self.calc_cat_guidance(self.groups[(family, feature_type)], family)
+            else:
+                raise ValueError(f"{feature_type} not existed for guidance calculation")
+            self.guides[(family, feature_type)] = res
+
+        return self.guides
+            
+    def calc_bit_guidance(self, data, family):
+        # Cross usage
+        # imp_bit = self.fi[self.fi["feature"].str.startswith("bit")].copy()
+        imp_bit = data.copy()
+        # init phase
+        i_norm = imp_bit["importance"] / imp_bit["importance"].max()
+        # direction = self.bitgui["direction"].fillna(0.0)
+        # strength = self.bitgui["direction_strength"].fillna(0.0)
+        direction = self.direction["direction"]
+        strength = self.direction["strength"]
+        logit0 = np.log(self.sparsity_rate / (1 - self.sparsity_rate))
+
+        g = np.sign(direction) * np.tanh(strength) * i_norm.to_numpy()
+        p_gui = 1 / (1 + np.exp(-(logit0 + self.alpha * self.G * g)))
+        
+        p_final = list((1 - self.mrate) * p_gui + self.mrate * 0.5)
+
+        # variance phase
+        i_share = imp_bit["importance"] / imp_bit["importance"].sum()
+        i_rel = i_share / i_share.max()
+
+        # self.b_star = (self.bitgui["direction"] > 0).astype(int).to_numpy()
+        b_star = (self.direction["direction"] > 0).astype(int).to_numpy()
+
+        # d_hat = self.bitgui["direction_strength"] / self.bitgui["direction_strength"].max()
+        d_hat = self.direction["strength"] / self.direction["strength"].max()
+
+        # i_share_bit = i_share.to_numpy()
+
+        s_bit = (i_rel.to_numpy() + d_hat.to_numpy()) / 2
+        mutation_prob = self.mrate * ((1 - self.kappa) + self.kappa * (1-s_bit))
+
+        return {
+            "family": family,
+            "type": "binary",
+            "features": imp_bit["feature"].tolist(),
+            "init_prob": p_final,
+            "preferred": b_star,
+            "mutation_prob": mutation_prob,
+            "importance_share": i_share.to_numpy()
+        }
+        
+    def calc_cat_guidance(self, data, family):
+        # cross usage
+        data = data.copy()
+        features = data["feature"].to_list()
 
         # init phase
-        # i_norm = imp_layer["importance"] / imp_layer["importance"].max()
         self.prob_layers = {}
-        imp_layer["I_norm"] = imp_layer["importance"] / imp_layer["importance"].max()
-        actual_ops = self.layer_limit - 2
-        
-        for j in range(1, actual_ops + 1):
-            col = f"layer {j}"
-            all_dist = self.population[col].value_counts(normalize=True)
-            tendency = self.layergui[j]
-            I_j = imp_layer.loc[imp_layer["feature"] == col, "I_norm"].values[0]
-            ops = all_dist.index
+        max_imp = data["importance"].max()
+        if max_imp > 0:
+            data["I_norm"] = data["importance"] / max_imp
+        else:
+            data["I_norm"] = 0.0
 
-            logits = np.array([np.log(all_dist[o] + self.eps) + self.beta * self.G * I_j * tendency.get(o, 0.0) for o in ops])
+        tendency_df = self.tendency[self.tendency["feature"].isin(features)].copy()
+        prob_init = {}
+        spreads = {}
+
+        
+        for _, row in data.iterrows():
+
+            feature = row["feature"]
+            I_j = row["I_norm"]
+
+            all_dist = (self.population[feature].value_counts(normalize=True))
+            tdf = tendency_df[tendency_df["feature"] == feature]
+            tendency_map = (tdf.set_index("state")["tendency"].to_dict())
+
+            states = list(all_dist.index)
+
+            logits = np.array([np.log(all_dist[s] + self.eps) + self.beta * self.G * I_j * tendency_map.get(s, 0.0) for s in states])
             p_gui = np.exp(logits - logits.max())
             p_gui /= p_gui.sum()
 
-            K = len(ops)
-            p_final_layers = (1 - self.mrate) * p_gui + self.mrate * (1/K)
-            self.prob_layers[col] = list(zip(ops, p_final_layers))
+            K = len(states)
+            p_final = (1 - self.mrate) * p_gui + self.mrate * (1/K)
+            prob_init[feature] = list(zip(states, p_final))
+
+            if len(tdf) > 0:
+                spreads[feature] = (tdf["tendency"].max() - tdf["tendency"].min())
+            else:
+                spreads[feature] = 0.0
 
         # variance phase
-        i_share = imp_layer["importance"] / imp_layer["importance"].sum()
-        i_rel = i_share / i_share.max()
+        i_sum = data["importance"].max()
+        if i_sum > 0:
+            i_share = data["importance"] / i_sum
+        else:
+            i_share = pd.Series(0.0, index = data.index)
+        max_share = i_share.max()
+        if max_share > 0:
+            i_rel = i_share / i_share.max()
+        else:
+            i_rel = pd.Series(0.0, index = data.index)
 
-        self.i_share_layer = i_share.to_numpy()
+        spread = pd.Series(spreads)
+        max_spread = spread.max()
+        if max_spread > 0:
+            G_hat = (spread / max_spread)
+        else:
+            G_hat = pd.Series(0.0, index = spread.index)
 
-        spread = self.layergui.max() - self.layergui.min()
-        G_hat = (spread / spread.max()).reindex(range(1, self.layer_limit - 2 + 1))
+        G_hat = G_hat.reindex(data["feature"]).fillna(0.0)
+        i_rel = pd.Series(i_rel.to_numpy(), index = data["feature"])
 
-        s_layer = (i_rel.to_numpy() + G_hat.to_numpy()) / 2
-        self.layer_mutation_prob = self.mrate * ((1- self.kappa) + self.kappa * (1 - s_layer))
-    
-        
+        s_cat = (i_rel + G_hat) / 2
+        mutation_prob = self.mrate * ((1- self.kappa) + self.kappa * (1 - s_cat))
+
+        return {
+            "family": family,
+            "type": "categorical",
+            "features": features,
+            "init_prob": prob_init,
+            "importance_share": i_share.to_numpy(),
+            "importance_relative": i_rel.to_numpy(),
+            "mutation_prob": mutation_prob.to_numpy(),
+            "tendency_spread": G_hat.to_numpy()
+        }
+
+    def get_bit_cell(self, content = None, pos = 0):
+        if content in self.imp_bit.columns:
+            return self.imp_bit.iloc[content, pos]
+        elif content in self.bitgui.columns:
+            return self.bitgui.iloc[content, pos]
+        else:
+            raise ValueError(f"{content} not recognized at position {pos}")
+
+    def get_layer_cell(self, content = None, pos = 0):
+        if content in self.imp_layer.columns:
+            return self.imp_layer.iloc[content, pos]
+        elif content in self.layergui.columns:
+            return self.layergui.iloc[content, pos]
+        else:
+            raise ValueError(f"{content} not recognized at position {pos}")
+
+    def get_b_star(self, i = 0): return self.b_star[i-1]
+    def get_prob_bit(self, i): return self.bit_mutation_prob[i-1]
+    def get_prob_layer(self, j): return self.layer_mutation_prob[j-1]
+    def bit_weight(self, i): return self.kappa * self.i_share_bit[i-1]
+    def layer_weight(self, j): return self.kappa * self.i_share_layer[j-1]
+    def layer_eff(self, op, j): return self.layergui.loc[op, j]
+    def layer_eff_range(self, j):
+        col = self.layergui[j]
+        return col.min(), col.max()
+
+# Helper Functions
 
 def flatten_code(code):
     return list(code.replace("-", ""))
