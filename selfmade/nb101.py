@@ -81,7 +81,9 @@ class NASBench101Space(abstract.SearchSpace):
         self.bit_key = ("code_bit", "binary")
         self.layer_key = ("operations", "categorical")
         self.bit_type = "binary"
-        self.layer_type = "categorical" 
+        self.layer_type = "categorical"
+        self.layer_prob_init = None
+        self.bit_prob_init = None
 
     def random_genome(self):
         ops = random_operation(self.layer_limit, self.operations)
@@ -96,9 +98,9 @@ class NASBench101Space(abstract.SearchSpace):
 
     def guided_genome(self, guidance):
         if self.layer_prob_init:
-            self.layer_prob_init = guidance.get_cell(self.bit_key, self.bit_type, "all")
+            self.layer_prob_init = guidance.get_cell(self.layer_key, self.layer_type, "all")
         if self.bit_prob_init:
-            self.bit_prob_init = guidance.get_cell(self.layer_key, self.layer_type, "all")
+            self.bit_prob_init = guidance.get_cell(self.bit_key, self.bit_type, "all")
         ops = guided_layers(self.layer_limit, self.layer_prob_init)
         dims = len(ops) - 1
 
@@ -233,8 +235,8 @@ class NASBench101Space(abstract.SearchSpace):
         for attempt in range(MAX_PAIR_RETRIES):
             c1, c2 = [], []
             for i in range(1, len(genome1) + 1):
-                w = guidance.bit_weight(i)
-                b = guidance.get_b_star(i)
+                w = guidance.get_weight(self.bit_key, i)
+                b = guidance.get_b_star(self.bit_key, i)
                 bias = w * ((genome1[i-1] == b) - (genome2[i-1] == b))
                 probs = min(1.0, max(0.0, base_parents + bias))
         
@@ -350,7 +352,7 @@ class NASBench101Space(abstract.SearchSpace):
         # while True:
             pre_code = original.copy()
             for p in range(len(pre_code)):
-                if pre_code[p] in ('0', '1') and random.random() < guidance.get_cell(self.bit_key, "mutation_prob", p):
+                if pre_code[p] in ('0', '1') and random.random() < guidance.get_prob_mut(self.bit_key, p):
                     pre_code[p] = '0' if pre_code[p] == '1' else '1'
             new_code = rebuild_code(pre_code, self.actual_layers + 1)
             valid, reason = self.validate(new_code)
@@ -378,7 +380,7 @@ class NASBench101Space(abstract.SearchSpace):
         # Exclude IO
         for o in range(1, len(pre_ops) - 1):
             # print(f"current op no.{o}: {pre_ops[o]}")
-            if random.random() < guidance.get_cell(self.layer_key, "mutation_prob", o-1):
+            if random.random() < guidance.get_prob_mut(self.layer_key, o-1):
                 choices = [op for op in avail_ops if op != pre_ops[o]]
                 pre_ops[o] = random.choice(choices)
 
@@ -1071,26 +1073,114 @@ class Guidance:
             "tendency_spread": G_hat.to_numpy()
         }
 
-    def get_cell(self, main_key : tuple = None, sub_key = None, pos = 0):
-        if main_key in self.guides:
-            if sub_key in self.guides[main_key]:
-                if pos == "all":
-                    return self.guides[main_key][sub_key]
-                return self.guides[main_key][sub_key][pos]
-            else:
-                raise ValueError(f"{sub_key} not recognized at position {pos}")
-        else:
-            raise ValueError(f"{main_key} not recognized at position {pos}")
+    # def get_cell(self, main_key : tuple = None, sub_key = None, pos = 0):
+    #     if main_key in self.guides:
+    #         if sub_key in self.guides[main_key]:
+    #             if pos == "all":
+    #                 return self.guides[main_key][sub_key]
+    #             return self.guides[main_key][sub_key][pos]
+    #         else:
+    #             raise ValueError(f"{sub_key} not recognized at position {pos}")
+    #     else:
+    #         raise ValueError(f"{main_key} not recognized at position {pos}")
 
-    def get_prob_bit(self, i): return self.bit_mutation_prob[i-1]
-    def get_prob_layer(self, j): return self.layer_mutation_prob[j-1]
-    def get_b_star(self, key, i = 0): return self.get_cell(key, "preferred", i)
-    def bit_weight(self, i): return self.kappa * self.i_share_bit[i-1]
-    def layer_weight(self, j): return self.kappa * self.i_share_layer[j-1]
-    def layer_eff(self, op, j): return self.layergui.loc[op, j]
-    def layer_eff_range(self, j):
-        col = self.layergui[j]
-        return col.min(), col.max()
+    # def get_feature(self, key, field, feature):
+    #     group = self.guides[key]
+
+    #     if field not in group:
+    #         raise KeyError(
+    #             f"{field} not found in guidance group {key}"
+    #         )
+
+    #     value = group[field]
+
+    #     if isinstance(value, dict):
+    #         return value[feature]
+
+    #     features = group["features"]
+
+    #     try:
+    #         idx = features.index(feature)
+    #     except ValueError:
+    #         raise KeyError(
+    #             f"{feature} not found in guidance group {key}"
+    #         )
+
+    #     return value[idx]
+
+    # def get_prob_mut(self, key, feature): 
+    #     return self.feature(key, "mutation_prob", feature)
+    # def get_b_star(self, key, feature): 
+    #     return self.get_cell(key, "preferred", feature)
+    # def get_weight(self, key, feature): 
+    #     imp_share = self.get_feature(key, "importance_share", feature)
+    #     return self.kappa * imp_share
+    # def layer_eff(self, op, j): return self.layergui.loc[op, j]
+    # def layer_eff_range(self, j):
+    #     col = self.layergui[j]
+    #     return col.min(), col.max()
+
+    def get_cell(self, key, field, pos="all"):
+        group = self.guides[key]
+
+        if field not in group:
+            raise KeyError(
+                f"{field} not found in {key}"
+            )
+
+        value = group[field]
+
+        if pos == "all":
+            return value
+
+        return value[pos]
+
+
+    def get_feature(self, key, field, feature):
+        group = self.guides[key]
+        value = group[field]
+
+        if isinstance(value, dict):
+            return value[feature]
+
+        idx = group["features"].index(feature)
+        return value[idx]
+
+
+    def get_weight(self, key, feature):
+        share = self.get_feature(
+            key,
+            "importance_share",
+            feature
+        )
+
+        return self.kappa * share
+
+
+    def get_tendency(self, feature, state):
+        rows = self.tendency[
+            (self.tendency["feature"] == feature) &
+            (self.tendency["state"] == state)
+        ]
+
+        if rows.empty:
+            return 0.0
+
+        return rows.iloc[0]["tendency"]
+
+
+    def get_tendency_range(self, feature):
+        rows = self.tendency[
+            self.tendency["feature"] == feature
+        ]
+
+        if rows.empty:
+            return 0.0, 0.0
+
+        return (
+            rows["tendency"].min(),
+            rows["tendency"].max()
+        )
 
 # Helper Functions
 
