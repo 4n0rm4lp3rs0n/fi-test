@@ -14,7 +14,6 @@ import selfmade.abstract as abstract
 from sklearn.preprocessing import LabelEncoder
 from sklearn.inspection import permutation_importance
 from scipy.stats import spearmanr
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error
 
@@ -79,6 +78,10 @@ class NASBench101Space(abstract.SearchSpace):
 
         self.operations = operations
         self.actual_layers = layer_limit - 2
+        self.bit_key = ("code_bit", "binary")
+        self.layer_key = ("operations", "categorical")
+        self.bit_type = "binary"
+        self.layer_type = "categorical" 
 
     def random_genome(self):
         ops = random_operation(self.layer_limit, self.operations)
@@ -92,11 +95,15 @@ class NASBench101Space(abstract.SearchSpace):
                 return GenomeNB101(code, ops)
 
     def guided_genome(self, guidance):
-        ops = guided_layers(self.layer_limit, guidance.prob_layers)
+        if self.layer_prob_init:
+            self.layer_prob_init = guidance.get_cell(self.bit_key, self.bit_type, "all")
+        if self.bit_prob_init:
+            self.bit_prob_init = guidance.get_cell(self.layer_key, self.layer_type, "all")
+        ops = guided_layers(self.layer_limit, self.layer_prob_init)
         dims = len(ops) - 1
 
         while True:
-            code = guided_bits(dims, guidance.p_final_bits)
+            code = guided_bits(dims, self.bit_prob_init)
             valid, _ = valid_architecture(string_to_matrix(code), self.edge_limit)
 
             if valid:
@@ -343,7 +350,7 @@ class NASBench101Space(abstract.SearchSpace):
         # while True:
             pre_code = original.copy()
             for p in range(len(pre_code)):
-                if pre_code[p] in ('0', '1') and random.random() < guidance.get_prob_bit(p + 1):
+                if pre_code[p] in ('0', '1') and random.random() < guidance.get_cell(self.bit_key, "mutation_prob", p):
                     pre_code[p] = '0' if pre_code[p] == '1' else '1'
             new_code = rebuild_code(pre_code, self.actual_layers + 1)
             valid, reason = self.validate(new_code)
@@ -371,7 +378,7 @@ class NASBench101Space(abstract.SearchSpace):
         # Exclude IO
         for o in range(1, len(pre_ops) - 1):
             # print(f"current op no.{o}: {pre_ops[o]}")
-            if random.random() < guidance.get_prob_layer(o):
+            if random.random() < guidance.get_cell(self.layer_key, "mutation_prob", o-1):
                 choices = [op for op in avail_ops if op != pre_ops[o]]
                 pre_ops[o] = random.choice(choices)
 
@@ -1064,25 +1071,20 @@ class Guidance:
             "tendency_spread": G_hat.to_numpy()
         }
 
-    def get_bit_cell(self, content = None, pos = 0):
-        if content in self.imp_bit.columns:
-            return self.imp_bit.iloc[content, pos]
-        elif content in self.bitgui.columns:
-            return self.bitgui.iloc[content, pos]
+    def get_cell(self, main_key : tuple = None, sub_key = None, pos = 0):
+        if main_key in self.guides:
+            if sub_key in self.guides[main_key]:
+                if pos == "all":
+                    return self.guides[main_key][sub_key]
+                return self.guides[main_key][sub_key][pos]
+            else:
+                raise ValueError(f"{sub_key} not recognized at position {pos}")
         else:
-            raise ValueError(f"{content} not recognized at position {pos}")
+            raise ValueError(f"{main_key} not recognized at position {pos}")
 
-    def get_layer_cell(self, content = None, pos = 0):
-        if content in self.imp_layer.columns:
-            return self.imp_layer.iloc[content, pos]
-        elif content in self.layergui.columns:
-            return self.layergui.iloc[content, pos]
-        else:
-            raise ValueError(f"{content} not recognized at position {pos}")
-
-    def get_b_star(self, i = 0): return self.b_star[i-1]
     def get_prob_bit(self, i): return self.bit_mutation_prob[i-1]
     def get_prob_layer(self, j): return self.layer_mutation_prob[j-1]
+    def get_b_star(self, key, i = 0): return self.get_cell(key, "preferred", i)
     def bit_weight(self, i): return self.kappa * self.i_share_bit[i-1]
     def layer_weight(self, j): return self.kappa * self.i_share_layer[j-1]
     def layer_eff(self, op, j): return self.layergui.loc[op, j]
