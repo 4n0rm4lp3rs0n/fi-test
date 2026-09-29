@@ -78,10 +78,17 @@ class NASBench101Space(abstract.SearchSpace):
 
         self.operations = operations
         self.actual_layers = layer_limit - 2
-        self.bit_key = ("code_bit", "binary")
-        self.layer_key = ("operations", "categorical")
-        self.bit_type = "binary"
-        self.layer_type = "categorical"
+
+        self.key_data = {
+            "bit_label": "code_bit",
+            "bit_type": "binary",
+            "layer_label": "operations",
+            "layer_type": "categorical",
+        }
+
+        self.key_data["bit_key"] = (self.key_data["bit_label"], self.key_data["bit_type"])
+        self.key_data["layer_key"] = (self.key_data["layer_label"], self.key_data["layer_type"])
+        
         self.layer_prob_init = None
         self.bit_prob_init = None
 
@@ -98,9 +105,9 @@ class NASBench101Space(abstract.SearchSpace):
 
     def guided_genome(self, guidance):
         if self.layer_prob_init:
-            self.layer_prob_init = guidance.get_cell(self.layer_key, self.layer_type, "all")
+            self.layer_prob_init = guidance.get_cell(self.layer_key, "init_prob", "all")
         if self.bit_prob_init:
-            self.bit_prob_init = guidance.get_cell(self.bit_key, self.bit_type, "all")
+            self.bit_prob_init = guidance.get_cell(self.bit_key, "init_prob", "all")
         ops = guided_layers(self.layer_limit, self.layer_prob_init)
         dims = len(ops) - 1
 
@@ -235,8 +242,9 @@ class NASBench101Space(abstract.SearchSpace):
         for attempt in range(MAX_PAIR_RETRIES):
             c1, c2 = [], []
             for i in range(1, len(genome1) + 1):
-                w = guidance.get_weight(self.bit_key, i)
-                b = guidance.get_b_star(self.bit_key, i)
+                label = self.key_data["bit_label"]
+                w = guidance.get_weight(self.bit_key, f"{label}{i}")
+                b = guidance.get_b_star(self.bit_key, f"{label}{i}")
                 bias = w * ((genome1[i-1] == b) - (genome2[i-1] == b))
                 probs = min(1.0, max(0.0, base_parents + bias))
         
@@ -280,12 +288,13 @@ class NASBench101Space(abstract.SearchSpace):
         base_parents = f1 / (f1 + f2)
     
         for j in range(1, len(ops1) + 1):
+            cur_feature = f"operations{i+1}"
             op1, op2 = ops1[j-1], ops2[j-1]
-            g1, g2 = self.guidance.layer_eff(op1, j), self.guidance.layer_eff(op2, j)
-            g_min, g_max = self.guidance.layer_eff_range(j)
+            g1, g2 = self.guidance.get_tendency(cur_feature, op1), self.guidance.get_tendency(cur_feature, op2)
+            g_min, g_max = self.guidance.get_tendency_range(cur_feature)
             span = g_max - g_min
             A = (g1 - g2) / span if span > 0 else 0.0
-            w = self.guidance.layer_weight(j)
+            w = self.guidance.get_weight(self.key_data["layer_key"], cur_feature)
             p = min(1.0, max(0.0, base_parents + w * A))
             if random.random() < p:
                 child1_ops.append(op1)
@@ -352,7 +361,9 @@ class NASBench101Space(abstract.SearchSpace):
         # while True:
             pre_code = original.copy()
             for p in range(len(pre_code)):
-                if pre_code[p] in ('0', '1') and random.random() < guidance.get_prob_mut(self.bit_key, p):
+                cur_bit = f"code_bit{p+1}"
+                if (pre_code[p] in ('0', '1') and
+                    random.random() < guidance.get_feature(self.bit_key, "mutation_prob", cur_bit)):
                     pre_code[p] = '0' if pre_code[p] == '1' else '1'
             new_code = rebuild_code(pre_code, self.actual_layers + 1)
             valid, reason = self.validate(new_code)
@@ -380,7 +391,7 @@ class NASBench101Space(abstract.SearchSpace):
         # Exclude IO
         for o in range(1, len(pre_ops) - 1):
             # print(f"current op no.{o}: {pre_ops[o]}")
-            if random.random() < guidance.get_prob_mut(self.layer_key, o-1):
+            if random.random() < guidance.get_feature(self.layer_key, o-1):
                 choices = [op for op in avail_ops if op != pre_ops[o]]
                 pre_ops[o] = random.choice(choices)
 
@@ -1156,6 +1167,8 @@ class Guidance:
 
         return self.kappa * share
 
+    def get_b_star(self, key, feature):
+        return self.get_feature(key, "preferred", feature)
 
     def get_tendency(self, feature, state):
         rows = self.tendency[
