@@ -89,9 +89,6 @@ class NASBench101Space(abstract.SearchSpace):
         self.key_data["bit_key"] = (self.key_data["bit_label"], self.key_data["bit_type"])
         self.key_data["layer_key"] = (self.key_data["layer_label"], self.key_data["layer_type"])
         
-        self.layer_prob_init = None
-        self.bit_prob_init = None
-
     def random_genome(self):
         ops = random_operation(self.layer_limit, self.operations)
         dims = len(ops) - 1
@@ -104,15 +101,14 @@ class NASBench101Space(abstract.SearchSpace):
                 return GenomeNB101(code, ops)
 
     def guided_genome(self, guidance):
-        if self.layer_prob_init:
-            self.layer_prob_init = guidance.get_cell(self.layer_key, "init_prob", "all")
-        if self.bit_prob_init:
-            self.bit_prob_init = guidance.get_cell(self.bit_key, "init_prob", "all")
-        ops = guided_layers(self.layer_limit, self.layer_prob_init)
+        layer_prob_init = guidance.get_cell(self.key_data["layer_key"], "init_prob", "all")
+        bit_prob_init = guidance.get_cell(self.key_data["bit_key"], "init_prob", "all")
+        
+        ops = guided_layers(self.layer_limit, layer_prob_init, self.key_data["layer_label"])
         dims = len(ops) - 1
 
         while True:
-            code = guided_bits(dims, self.bit_prob_init)
+            code = guided_bits(dims, bit_prob_init)
             valid, _ = valid_architecture(string_to_matrix(code), self.edge_limit)
 
             if valid:
@@ -243,8 +239,8 @@ class NASBench101Space(abstract.SearchSpace):
             c1, c2 = [], []
             for i in range(1, len(genome1) + 1):
                 label = self.key_data["bit_label"]
-                w = guidance.get_weight(self.bit_key, f"{label}{i}")
-                b = guidance.get_b_star(self.bit_key, f"{label}{i}")
+                w = guidance.get_weight(self.key_data["bit_key"], f"{label}{i}")
+                b = guidance.get_b_star(self.key_data["bit_key"], f"{label}{i}")
                 bias = w * ((genome1[i-1] == b) - (genome2[i-1] == b))
                 probs = min(1.0, max(0.0, base_parents + bias))
         
@@ -286,15 +282,18 @@ class NASBench101Space(abstract.SearchSpace):
 
         child1_ops, child2_ops = [], []
         base_parents = f1 / (f1 + f2)
+        
+        layer_key = self.key_data["layer_key"]
+        layer_label = self.key_data["layer_label"]
     
         for j in range(1, len(ops1) + 1):
-            cur_feature = f"operations{i+1}"
+            cur_feature = f"{layer_label}{j+1}"
             op1, op2 = ops1[j-1], ops2[j-1]
-            g1, g2 = self.guidance.get_tendency(cur_feature, op1), self.guidance.get_tendency(cur_feature, op2)
-            g_min, g_max = self.guidance.get_tendency_range(cur_feature)
+            g1, g2 = guidance.get_tendency(cur_feature, op1), guidance.get_tendency(cur_feature, op2)
+            g_min, g_max = guidance.get_tendency_range(cur_feature)
             span = g_max - g_min
             A = (g1 - g2) / span if span > 0 else 0.0
-            w = self.guidance.get_weight(self.key_data["layer_key"], cur_feature)
+            w = guidance.get_weight(layer_key, cur_feature)
             p = min(1.0, max(0.0, base_parents + w * A))
             if random.random() < p:
                 child1_ops.append(op1)
@@ -357,13 +356,14 @@ class NASBench101Space(abstract.SearchSpace):
         new_code = None
         invalids = Counter()
         success = False
+        bit_key = self.key_data["bit_key"]
         for attempt in range(MAX_PAIR_RETRIES):
         # while True:
             pre_code = original.copy()
             for p in range(len(pre_code)):
                 cur_bit = f"code_bit{p+1}"
                 if (pre_code[p] in ('0', '1') and
-                    random.random() < guidance.get_feature(self.bit_key, "mutation_prob", cur_bit)):
+                    random.random() < guidance.get_feature(bit_key, "mutation_prob", cur_bit)):
                     pre_code[p] = '0' if pre_code[p] == '1' else '1'
             new_code = rebuild_code(pre_code, self.actual_layers + 1)
             valid, reason = self.validate(new_code)
@@ -381,7 +381,7 @@ class NASBench101Space(abstract.SearchSpace):
         # print("total attempts: ", attempt)
         
         if not success:
-            new_code = pre_code
+            new_code = genome.code
 
         # Operation mutation  
         # copy() is used to make a new variable 
@@ -389,9 +389,12 @@ class NASBench101Space(abstract.SearchSpace):
         pre_ops = genome.operations.copy()
         # print(pre_ops)
         # Exclude IO
+        layer_key = self.key_data["layer_key"]
+        layer_label = self.key_data["layer_label"]
         for o in range(1, len(pre_ops) - 1):
             # print(f"current op no.{o}: {pre_ops[o]}")
-            if random.random() < guidance.get_feature(self.layer_key, o-1):
+            cur_feature = f"{layer_label}{o+1}"
+            if random.random() < guidance.get_feature(layer_key, "mutation_prob", cur_feature):
                 choices = [op for op in avail_ops if op != pre_ops[o]]
                 pre_ops[o] = random.choice(choices)
 
@@ -972,8 +975,14 @@ class Guidance:
         i_norm = imp_bit["importance"] / imp_bit["importance"].max()
         # direction = self.bitgui["direction"].fillna(0.0)
         # strength = self.bitgui["direction_strength"].fillna(0.0)
-        direction = self.direction["direction"]
-        strength = self.direction["strength"]
+        direction_df = (
+            self.direction
+            .set_index("feature")
+            .reindex(imp_bit["feature"])
+        )
+
+        direction = direction_df["direction"].fillna(0.0)
+        strength = direction_df["strength"].fillna(0.0)
         logit0 = np.log(self.sparsity_rate / (1 - self.sparsity_rate))
 
         g = np.sign(direction) * np.tanh(strength) * i_norm.to_numpy()
@@ -986,10 +995,10 @@ class Guidance:
         i_rel = i_share / i_share.max()
 
         # self.b_star = (self.bitgui["direction"] > 0).astype(int).to_numpy()
-        b_star = (self.direction["direction"] > 0).astype(int).to_numpy()
+        b_star = (direction > 0).astype(int).to_numpy()
 
         # d_hat = self.bitgui["direction_strength"] / self.bitgui["direction_strength"].max()
-        d_hat = self.direction["strength"] / self.direction["strength"].max()
+        d_hat = strength / strength.max()
 
         # i_share_bit = i_share.to_numpy()
 
@@ -1049,7 +1058,7 @@ class Guidance:
                 spreads[feature] = 0.0
 
         # variance phase
-        i_sum = data["importance"].max()
+        i_sum = data["importance"].sum()
         if i_sum > 0:
             i_share = data["importance"] / i_sum
         else:
@@ -1316,11 +1325,12 @@ def guided_bits(num_nodes, probs : list):
     return genome
     # return '-'.join(genome)
 
-def guided_layers(limit, guidance : dict):
+def guided_layers(limit, guidance : dict, label):
     ops = ['input']
     operation_nums = limit - 2 # one for input and one for output
     for o in range(1, operation_nums + 1):
-        operations, probs = zip(*guidance[f"layer {o}"])
+        cur_feature = f"{label}{o+1}"
+        operations, probs = zip(*guidance[cur_feature])
         ops.append(np.random.choice(operations, p = probs))
     ops.append('output')
     return ops
