@@ -421,6 +421,8 @@ class Population:
                 "generation" : [],
                 "representation" : [],
                 "fitness" : [],
+                "validation_accuracy": [],
+                "test_accuracy": [], # test accuracy is for record. not for GA
             }
             
         self.config = {
@@ -434,6 +436,18 @@ class Population:
             "best_val_acc" : 0,
             "best_candidate" : None,
         }
+
+        self.best_so_far = 0.0
+        self.best_history = []
+
+        self.history = {
+            "generation": [],
+            "best_val": [],
+            "test_of_best_val": [],
+        }
+        self.best_so_far_history = []
+
+        self.current_generation = 0
 
     def initialize(self):
         if self.guidance is None:
@@ -507,70 +521,140 @@ class Population:
         else:
             return self.space.guided_mutation(genome, self.space.operations, self.guidance)
 
-    def evolve(self, generation = 1):
+    def evolve(self):
         """
-        Evolution loop, including selection, crossover and mutation
+        Evolution ONCE, including selection, crossover and mutation
         """
-        self.config["generations"] = generation
+        self.current_generation += 1
+        gen = self.current_generation
+        self.config["generations"] = gen
+        next_generation = self.elitism(self.elite_size)
+        print(f"Generation {gen}")
 
-        for gen in range(1, generation + 1):
-            next_generation = self.elitism(self.elite_size)
-            print(f"Generation {gen}")
+        while len(next_generation) < self.population_size:
+            while True:
+                parent1 = self.selection(self.selector, self.survivors, self.candidates_per_round)[0]
+                parent2 = self.selection(self.selector, self.survivors, self.candidates_per_round)[0]
 
-            while len(next_generation) < self.population_size:
-                while True:
-                    parent1 = self.selection(self.selector, self.survivors, self.candidates_per_round)[0]
-                    parent2 = self.selection(self.selector, self.survivors, self.candidates_per_round)[0]
+                if parent1 is not parent2:
+                    break
 
-                    if parent1 is not parent2:
-                        break
+            # print("crossover attempt")
+            child1, child2 = self.crossover(parent1, parent2)
 
-                # print("crossover attempt")
-                child1, child2 = self.crossover(parent1, parent2)
+            if child1 is None and child2 is None:
+                continue
 
-                if child1 is None and child2 is None:
-                    continue
+            # print("mutation attempt")
+            child1_mut = self.mutation(child1)
+            child2_mut = self.mutation(child2)
 
-                # print("mutation attempt")
-                child1_mut = self.mutation(child1)
-                child2_mut = self.mutation(child2)
+            # print(child1)
+            # print(child2)
 
-                # print(child1)
-                # print(child2)
+            for child in (child1_mut, child2_mut):
+                self.single_evaluation(child)
 
-                for child in (child1_mut, child2_mut):
-                    self.single_evaluation(child)
+                if len(next_generation) < self.population_size:
+                    next_generation.append(child)
 
-                    if len(next_generation) < self.population_size:
-                        next_generation.append(child)
+        self.members = next_generation
 
-            self.members = next_generation
+        for genome in self.members:
+            if genome.fitness is None:
+                self.single_evaluation(genome)
 
-            for genome in self.members:
-                if genome.fitness is None:
-                    self.single_evaluation(genome)
+        best = max(self.members, key=lambda g: g.fitness)
 
-            best = max(self.members, key=lambda g: g.fitness)
+        print(f"Best performance: {best.fitness}")
 
-            print(f"Best performance: {best.fitness}")
+        self.record(gen)
 
-            self.record(gen)
+    # def record(self, generation, best):
+    #     """Record all candidates into pop.data"""
+    #     print(f"recording generation {generation}")
+    #     best = max(self.members, key = lambda g: g.fitness)
+
+    #     self.config["best_val_acc"] = best.fitness
+    #     self.config["best_candidate"] = best.representation
+
+    #     for m in self.members:
+    #         self.data["generation"].append(generation)
+    #         self.data["representation"].append(m.representation)
+    #         self.data["fitness"].append(m.fitness)
+    #         self.data["validation_accuracy"].append(m.metrics["validation_accuracy"])
+    #         self.data["test_accuracy"].append(m.metrics["test_accuracy"])
+
+    #     # current_best = max(g.fitness for g in self.members)
+    #     # self.best_so_far = max(self.best_so_far, current_best)
+    #     # self.best_history.append((generation, self.best_so_far))
+
+    #     self.history["generation"].append(generation)
+    #     self.history["best_val"].append(
+    #         best.metrics["validation_accuracy"]
+    #     )
+    #     self.history["test_of_best_val"].append(
+    #         best.metrics["test_accuracy"]
+    #     )
+
+    #     self.best_so_far = max(self.best_so_far, best.metrics["validation_accuracy"])
+    #     self.best_so_far_history.append(self.best_so_far)
+
+    #     print("finished recording")
 
     def record(self, generation):
-        """Record all candidates into pop.data"""
         print(f"recording generation {generation}")
-        best = max(self.members, key = lambda g: g.fitness)
 
-        self.config["best_val_acc"] = best.fitness
+        best_val = max(g.fitness for g in self.members)
+
+        best_candidates = [
+            g for g in self.members
+            if abs(g.fitness - best_val) <= 1e-12
+        ]
+
+        best = best_candidates[0]
+
+        self.config["best_val_acc"] = best_val
+        self.config["best_test_acc"] = best.metrics["test_accuracy"]
         self.config["best_candidate"] = best.representation
 
         for m in self.members:
-
             self.data["generation"].append(generation)
             self.data["representation"].append(m.representation)
             self.data["fitness"].append(m.fitness)
+            self.data["validation_accuracy"].append(
+                m.metrics["validation_accuracy"]
+            )
+            self.data["test_accuracy"].append(
+                m.metrics["test_accuracy"]
+            )
+
+        self.best_so_far = max(self.best_so_far, best_val)
+
+        tied_tests = [g.metrics["test_accuracy"] for g in best_candidates]
+
+        self.best_history.append({
+            "generation": generation,
+            "best_val": best_val,
+            "best_so_far": self.best_so_far,
+            "best_test": best.metrics["test_accuracy"],
+            "num_tied": len(best_candidates),
+            "tied_test_min": min(tied_tests),
+            "tied_test_max": max(tied_tests),
+            "tied_test_mean": np.mean(tied_tests),
+        })
 
         print("finished recording")
+
+    def evolve_loop(self, total_gen = 1, guidance = None):
+        if guidance is not None:
+            self.guidance = guidance
+        for _ in range(1, total_gen + 1):
+            self.evolve()
+
+    def true_test(self, genome):
+        test_results = self.evaluator.evaluate(genome)
+        return test_results
 
 class FeatureImportance(abstract.FeatureImportance):
     """Extract values from previous runs"""
@@ -1363,7 +1447,11 @@ def parse_out(path_dir : Path, run_res : dict, eval_res : dict):
 
     with open(path_dir / "config.json", "w") as c:
         json.dump(cfg, c, indent=4)
-    
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+
 # testing ground
     
 if __name__ == "__main__":
