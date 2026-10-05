@@ -529,7 +529,6 @@ class Population:
         gen = self.current_generation
         self.config["generations"] = gen
         next_generation = self.elitism(self.elite_size)
-        print(f"Generation {gen}")
 
         while len(next_generation) < self.population_size:
             while True:
@@ -566,7 +565,7 @@ class Population:
 
         best = max(self.members, key=lambda g: g.fitness)
 
-        print(f"Best performance: {best.fitness}")
+        print(f"Generation {gen} - Best performance: {best.fitness}")
 
         self.record(gen)
 
