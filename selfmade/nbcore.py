@@ -9,6 +9,8 @@ from scipy.stats import spearmanr
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error
 
+from sklearn.ensemble import RandomForestRegressor
+
 class Population:
     """General population for all NASes (maybe)"""
 
@@ -147,18 +149,13 @@ class Population:
                 if parent1 is not parent2:
                     break
 
-            # print("crossover attempt")
             child1, child2 = self.crossover(parent1, parent2)
 
             if child1 is None and child2 is None:
                 continue
 
-            # print("mutation attempt")
             child1_mut = self.mutation(child1)
             child2_mut = self.mutation(child2)
-
-            # print(child1)
-            # print(child2)
 
             for child in (child1_mut, child2_mut):
                 self.single_evaluation(child)
@@ -173,13 +170,63 @@ class Population:
                 self.single_evaluation(genome)
 
         best = max(self.members, key=lambda g: g.fitness)
+        print(f"Generation {gen} - Best performance: {best.fitness}")
 
+        self.record(gen)
+
+    def guidance_switch(self, switch, gui = None):
+        if switch == False:
+            self.guidance = None
+        else:
+            if self.guidance is None:
+                self.guidance = gui
+
+    def evolve_cfg(self, guidance, gui_cross = True, gui_mut = True):
+        """
+        Config for ablation studies
+        """
+        self.current_generation += 1
+        gen = self.current_generation
+        self.config["generations"] = gen
+        next_generation = self.elitism(self.elite_size)
+
+        while len(next_generation) < self.population_size:
+            while True:
+                parent1 = self.selection(self.selector, self.survivors, self.candidates_per_round)[0]
+                parent2 = self.selection(self.selector, self.survivors, self.candidates_per_round)[0]
+
+                if parent1 is not parent2:
+                    break
+
+            self.guidance_switch(gui_cross, guidance.copy())
+            child1, child2 = self.crossover(parent1, parent2)
+
+            if child1 is None and child2 is None:
+                continue
+
+            self.guidance_switch(gui_mut, guidance.copy())
+            child1_mut = self.mutation(child1)
+            child2_mut = self.mutation(child2)
+
+            for child in (child1_mut, child2_mut):
+                self.single_evaluation(child)
+
+                if len(next_generation) < self.population_size:
+                    next_generation.append(child)
+
+        self.members = next_generation
+
+        for genome in self.members:
+            if genome.fitness is None:
+                self.single_evaluation(genome)
+
+        best = max(self.members, key=lambda g: g.fitness)
         print(f"Generation {gen} - Best performance: {best.fitness}")
 
         self.record(gen)
 
     def record(self, generation):
-        print(f"recording generation {generation}")
+        print(f"Recording generation {generation}")
 
         best_val = max(g.fitness for g in self.members)
 
@@ -220,7 +267,7 @@ class Population:
             "tied_test_mean": np.mean(tied_tests),
         })
 
-        print("finished recording")
+        print("Finished recording")
 
     def evolve_loop(self, total_gen = 1, guidance = None):
         if guidance is not None:
@@ -816,3 +863,29 @@ class Guidance:
             rows["tendency"].min(),
             rows["tendency"].max()
         )
+
+def full_vanilla(pop_size, evo_loop, space, evaluator) -> Population:
+    """Full Vanilla, no Guidance"""
+    fv_pop = Population(pop_size, space, evaluator)
+    fv_pop.initialize()
+    fv_pop.evolve_loop(total_gen=evo_loop)
+    return fv_pop
+
+def full_guided(pop_size: int, evo_loop: int, space, evaluator, p_split = 0.5,
+                 gui_init = True, gui_cross = True, gui_mut = True) -> Population:
+    """Vanilla at beginning, then guided at init, crossover and mutation"""
+    if p_split <= 0 or p_split >= 1:
+        raise ValueError(f"p_split must be in range (0,1), got {p_split}")
+    bp = int(evo_loop * p_split)
+    if bp < 1:
+        bp = 1
+    elif (evo_loop - bp) == 0:
+        bp = evo_loop - 1
+    van_res = full_vanilla(pop_size, bp, space, evaluator)
+    rf = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=1)
+    fi = FeatureImportance(space)
+    imp = fi.pipeline(van_res.data, rf)
+
+    gui = Guidance(space, imp, van_res.config)
+    gui.sortNsplit()
+    gui.calculate_guidance()
