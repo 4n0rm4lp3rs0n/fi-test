@@ -2,6 +2,7 @@ import numpy as np
 import random
 import pandas as pd
 import selfmade.abstract as abstract
+import copy
 
 from sklearn.preprocessing import LabelEncoder
 from sklearn.inspection import permutation_importance
@@ -278,6 +279,33 @@ class Population:
     def true_test(self, genome):
         test_results = self.evaluator.evaluate(genome)
         return test_results
+
+    def copy(self):
+        new_pop = Population(
+            population_size=self.population_size,
+            search_space=self.space,
+            evaluator=self.evaluator,
+            guidance=copy.deepcopy(self.guidance),
+            mutation_rate=self.mutation_rate,
+            elite_size=self.elite_size,
+            selector=self.selector,
+            survivors=self.survivors,
+            candidates_per_round=self.candidates_per_round
+        )
+
+        # Mutable state
+        new_pop.members = copy.deepcopy(self.members)
+        new_pop.data = copy.deepcopy(self.data)
+        new_pop.config = copy.deepcopy(self.config)
+        new_pop.best_history = copy.deepcopy(self.best_history)
+        new_pop.history = copy.deepcopy(self.history)
+        new_pop.best_so_far_history = copy.deepcopy(self.best_so_far_history)
+
+        # Scalar state
+        new_pop.best_so_far = self.best_so_far
+        new_pop.current_generation = self.current_generation
+
+        return new_pop
 
 class FeatureImportance(abstract.FeatureImportance):
     """Extract values from previous runs"""
@@ -634,7 +662,8 @@ class Guidance:
         self.kappa = np.clip(self.r2, 0.0, 1.0)
         
     def sortNsplit(self):
-        df = self.fi["df_imp"].copy()
+        # df = self.fi["df_imp"].copy()
+        df = self.fi["perm_imp"].copy()
 
         # Extract family and numerical position
         extracted = df["feature"].str.extract(r"^([A-Za-z_]+)\s*(\d+)$")
