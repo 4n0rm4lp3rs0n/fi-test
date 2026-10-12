@@ -4,7 +4,7 @@ from nasbench import api
 
 # 1. Initialize the NAS-Bench-101 API
 # Change this path to where your .tfrecord file is stored
-tfrecord_path = r'F:\vinh\vscs\fi\datas\nasbench_full.tfrecord'
+tfrecord_path = r'datas\nasbench_full.tfrecord'
 output_csv_path = 'nasbench101_flat_dataset.csv'
 
 print("Loading NAS-Bench-101 dataset (this may take a couple of minutes)...")
