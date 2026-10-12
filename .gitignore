@@ -5,3 +5,4 @@ __pycache__/
 records/
 records*/
 datas/
+*.csv
