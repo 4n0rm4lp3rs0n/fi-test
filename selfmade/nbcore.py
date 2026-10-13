@@ -662,8 +662,8 @@ class Guidance:
         self.kappa = np.clip(self.r2, 0.0, 1.0)
         
     def sortNsplit(self):
-        # df = self.fi["df_imp"].copy()
-        df = self.fi["perm_imp"].copy()
+        df = self.fi["df_imp"].copy()
+        # df = self.fi["perm_imp"].copy()
 
         # Extract family and numerical position
         extracted = df["feature"].str.extract(r"^([A-Za-z_]+)\s*(\d+)$")
