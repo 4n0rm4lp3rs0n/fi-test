@@ -466,7 +466,7 @@ class FeatureImportance(abstract.FeatureImportance):
     def _bin_eff(self, x, y):
         states = sorted(x.dropna().unique())
 
-        if states != [0,1]:
+        if states != [0,1] and states != [1] and states != [0]:
             raise ValueError(f"Binary feature must contain 0 or 1, got {states}")
 
         y0 = y[x == 0]
@@ -851,6 +851,9 @@ class Guidance:
 
         if isinstance(value, dict):
             return value[feature]
+
+        print(feature)
+        print(group["features"])
 
         idx = group["features"].index(feature)
         return value[idx]
