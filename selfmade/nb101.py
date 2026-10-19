@@ -11,7 +11,7 @@ import json
 import selfmade.abstract as abstract
 
 # GLOBAL PARAMETERS
-MAX_PAIR_RETRIES = 10000
+MAX_PAIR_RETRIES = 1000
 
 class GenomeNB101(abstract.Genome):
     def __init__(self, code, operations):
@@ -390,6 +390,55 @@ class NASBench101Space(abstract.SearchSpace):
                 pre_ops[o] = random.choice(choices)
 
         return GenomeNB101(new_code, pre_ops)
+
+    
+    def get_feature_metadata(self, feature):
+        """
+        Return metadata for a feature generated from this search space.
+
+        FeatureImportance uses this metadata without knowing
+        anything about NAS-Bench-101 specifically.
+        """
+        for key, family in (
+            ("bit_key", "binary"),
+            ("layer_key", "categorical"),
+        ):
+            label, feature_type = self.key_data[key]
+
+            if not feature.startswith(label):
+                continue
+
+            suffix = feature[len(label):]
+
+            if not suffix.isdigit():
+                continue
+
+            index = int(suffix)
+
+            if family == "binary":
+                return {
+                    "family": label,
+                    "type": feature_type,
+                    "states": [0, 1],
+                    "index": index,
+                    "mutable": True,
+                }
+
+            # The operation list belongs to the search space,
+            # not to the feature-importance implementation.
+            if 1 <= index <= self.layer_limit:
+                is_internal = 1 < index < self.layer_limit
+
+                return {
+                    "family": label,
+                    "type": feature_type,
+                    "states": list(self.operations),
+                    "index": index,
+                    "mutable": is_internal,
+                }
+
+        return None
+
 
 # Helper Functions
 

@@ -390,60 +390,95 @@ class FeatureImportance(abstract.FeatureImportance):
         if encoders:
             self.encoders = encoders
         return X, y, self.encoders
-
+        
     def get_importance(self, model):
-        # Encode
-        _, _, _ = self.encode()
+        # Encode the data, preserving the full feature schema.
+        self.encode()
 
-        df = self.data.copy()
+        y = self.data["fitness"].copy()
+        all_features = [
+            c for c in self.data.columns if c != "fitness"
+        ]
+        X_all = self.data[all_features].copy()
 
-        # Remove constants
+        # Constant features cannot teach the surrogate how fitness changes.
         constant_cols = [
-            c for c in df.columns
-            if c != "fitness" and df[c].nunique(dropna=True) <= 1
+            c for c in all_features
+            if X_all[c].nunique(dropna=True) <= 1
+        ]
+        active_cols = [
+            c for c in all_features if c not in constant_cols
         ]
 
-        df = df.drop(columns=constant_cols)
+        # Default: retain every feature with zero importance.
+        gini_values = pd.Series(0.0, index=all_features)
+        perm_values = pd.Series(0.0, index=all_features)
+        perm_stds = pd.Series(0.0, index=all_features)
 
-        y = df["fitness"]
-        X = df.drop(columns = ["fitness"]).copy()
+        if len(active_cols) == 0 or len(y) < 5:
+            # No reliable surrogate can be trained.
+            r2 = 0.0
+            mae = float(np.mean(np.abs(y - y.mean())))
+            corr, p_val = 0.0, 1.0
 
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-        model.fit(X_train, y_train)
-        pred = model.predict(X_test)
-
-        r2 = r2_score(y_test, pred)
-        mae = mean_absolute_error(y_test, pred)
-
-        if hasattr(model, "feature_importances_"):
-            importance = model.feature_importances_
         else:
-            importance = None
-        
+            X = X_all[active_cols]
+
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42
+            )
+
+            model.fit(X_train, y_train)
+            pred = model.predict(X_test)
+
+            r2 = r2_score(y_test, pred)
+            mae = mean_absolute_error(y_test, pred)
+
+            # Gini/tree importance for active features.
+            if hasattr(model, "feature_importances_"):
+                gini_values.loc[active_cols] = (
+                    model.feature_importances_
+                )
+
+            # Permutation importance for active features.
+            perm = permutation_importance(model, X_test, y_test, n_repeats=10, random_state=42, n_jobs=1)
+
+            perm_values.loc[active_cols] = perm.importances_mean
+            perm_stds.loc[active_cols] = perm.importances_std
+
+            # Calculate agreement only where importance is estimable.
+            if (
+                len(active_cols) >= 2
+                and gini_values.loc[active_cols].nunique() > 1
+                and perm_values.loc[active_cols].nunique() > 1
+            ):
+                corr, p_val = spearmanr(
+                    gini_values.loc[active_cols],
+                    perm_values.loc[active_cols]
+                )
+                corr = float(corr) if np.isfinite(corr) else 0.0
+                p_val = float(p_val) if np.isfinite(p_val) else 1.0
+            else:
+                corr, p_val = 0.0, 1.0
+
         importance_df = pd.DataFrame({
-            "feature": X.columns,
-            "importance": importance
-        }).sort_values("importance", ascending=False).reset_index(drop = True)
-        
-        perm = permutation_importance(
-            model, X_test, y_test, n_repeats=10,
-            random_state=42, n_jobs=1)
-        
-        corr, p_val = spearmanr(importance, perm.importances_mean)
+            "feature": all_features,
+            "importance": gini_values.reindex(all_features).to_numpy()
+            }).sort_values("importance", ascending=False).reset_index(drop=True)
 
         perm_df = pd.DataFrame({
-                "feature": X.columns,
-                "importance": perm.importances_mean,
-                "std": perm.importances_std
-                }).sort_values("importance", ascending=False).reset_index(drop=True)
-                    
+            "feature": all_features,
+            "importance": perm_values.reindex(all_features).to_numpy(),
+            "std": perm_stds.reindex(all_features).to_numpy()
+        }).sort_values("importance", ascending=False).reset_index(drop=True)
+
         self.r2 = r2
         self.mae = mae
         self.imp_df = importance_df
         self.perm = perm_df
 
-        return {"df_imp" : importance_df, "perm_imp" : perm_df, "r2": r2, "mae" : mae, "corr": corr, "p_value": p_val}
+        return {"df_imp": importance_df, "perm_imp": perm_df, "r2": r2, "mae": mae, "corr": corr, "p_value": p_val}
+
         
     def calculate_effect(self, feature, feature_type):
         x = self.data[feature]
@@ -451,7 +486,7 @@ class FeatureImportance(abstract.FeatureImportance):
         if feature_type == "binary":
             return self._bin_eff(x, y)
         elif feature_type == "categorical":
-            return self._cat_eff(x, y)
+            return self._cat_eff(x, y, feature = feature)
         else:
             raise ValueError(f"{feature_type} not existed in {feature}")
         
@@ -467,6 +502,7 @@ class FeatureImportance(abstract.FeatureImportance):
         states = sorted(x.dropna().unique())
 
         if states != [0,1] and states != [1] and states != [0]:
+        # if states != [0,1]:
             raise ValueError(f"Binary feature must contain 0 or 1, got {states}")
 
         y0 = y[x == 0]
@@ -497,38 +533,56 @@ class FeatureImportance(abstract.FeatureImportance):
                 "strength": strength
                 }
 
-    def _cat_eff(self, x, y):
-        states = list(x.dropna().unique())
+        
+    def _cat_eff(self, x, y, feature=None):
+        metadata = (
+            self.space.get_feature_metadata(feature)
+            if feature is not None else None
+        )
+
+        if metadata and metadata.get("states") is not None:
+            states = list(metadata["states"])
+        else:
+            states = list(x.dropna().unique())
+
         overall_mean = y.mean()
-
         means = {}
-
-        for state in states:
-            means[state] = y[x == state].mean()
-
-        effects = {
-            state: mean - overall_mean
-            for state, mean in means.items()
-        }
-
-        preferred = max(effects, key=effects.get)
-        eff_spread = max(effects.values()) - min(effects.values())
-
+        effects = {}
+        all_dist = x.value_counts(normalize=True)
         threshold = y.quantile(0.8)
         good_mask = y >= threshold
-
-        all_dist = x.value_counts(normalize=True)
-
         good_dist = x[good_mask].value_counts(normalize=True)
 
-        tendency = good_dist.subtract(all_dist, fill_value=0.0)
+        for state in states:
+            mask = x == state
+            means[state] = y[mask].mean() if mask.any() else np.nan
+            effects[state] = (
+                means[state] - overall_mean
+                if mask.any() else 0.0
+            )
 
+        # Only observed evidence contributes to the tendency.
+        tendency = good_dist.subtract(all_dist, fill_value=0.0)
         tendency = {
-            state: tendency.get(state, 0.0)
+            state: float(tendency.get(state, 0.0))
             for state in states
         }
 
-        tendency_spread = (max(tendency.values()) - min(tendency.values()))
+        observed_effects = [
+            effects[state]
+            for state in states
+            if np.isfinite(effects[state])
+        ]
+
+        preferred = (
+            max(observed_effects, key=lambda v: v)
+            if observed_effects else None
+        )
+
+        effect_spread = (
+            max(observed_effects) - min(observed_effects)
+            if len(observed_effects) > 1 else 0.0
+        )
 
         return {
             "type": "categorical",
@@ -537,18 +591,44 @@ class FeatureImportance(abstract.FeatureImportance):
             "means": means,
             "effects": effects,
             "preferred": preferred,
-            "effect_spread": eff_spread,
-            "tendency": {state: tendency.get(state, 0.0) for state in states},
-            "tendency_spread": tendency_spread,
+            "effect_spread": effect_spread,
+            "tendency": tendency,
+            "tendency_spread": (
+                max(tendency.values()) - min(tendency.values())
+                if tendency else 0.0
+            ),
         }
 
+
+    # def label_check(self, feature):
+    #     state = self.data[feature].dropna().unique()
+    #     if set(state).issubset({0, 1}):
+    #         return "binary"
+    #     if len(state) <= 1:
+    #         return "constant"
+    #     return "categorical"
+
+    
     def label_check(self, feature):
-        state = self.data[feature].dropna().unique()
-        if set(state).issubset({0, 1}):
-            return "binary"
-        if len(state) <= 1:
+        """
+        Infer feature type from search-space metadata first.
+        Use observed values only as a generic fallback.
+        """
+        metadata = self.space.get_feature_metadata(feature)
+
+        if metadata is not None:
+            return metadata["type"]
+
+        values = self.data[feature].dropna().unique()
+
+        if len(values) <= 1:
             return "constant"
+
+        if set(values).issubset({0, 1}):
+            return "binary"
+
         return "categorical"
+
 
     def calculate_effects(self):
         effects = {}
@@ -556,6 +636,8 @@ class FeatureImportance(abstract.FeatureImportance):
             if feature == "fitness":
                 continue
             feature_type = self.label_check(feature)
+            # elif feature == "categorical":
+            #     effects[feature] = self._cat_eff(self.data[feature], self.data["fitness"], feature=feature)
             if feature_type == "constant":
                 continue
             effects[feature] = self.calculate_effect(feature, feature_type)
@@ -673,6 +755,7 @@ class Guidance:
 
         # Get type from FeatureImportance
         df["type"] = df["feature"].map(self.feature_types)
+        df = df[df["type"] != "constant"].copy()
 
         # Check that every feature got a type
         if df["type"].isna().any():
@@ -705,12 +788,13 @@ class Guidance:
             
     def calc_bit_guidance(self, data, family):
         # Cross usage
-        # imp_bit = self.fi[self.fi["feature"].str.startswith("bit")].copy()
         imp_bit = data.copy()
         # init phase
-        i_norm = imp_bit["importance"] / imp_bit["importance"].max()
-        # direction = self.bitgui["direction"].fillna(0.0)
-        # strength = self.bitgui["direction_strength"].fillna(0.0)
+        max_imp = imp_bit["importance"].max()
+        if max_imp > 0:
+            i_norm = imp_bit["importance"] / max_imp
+        else:
+            i_norm = pd.Series(0.0, index=imp_bit.index)
         direction_df = (
             self.direction
             .set_index("feature")
@@ -719,6 +803,10 @@ class Guidance:
 
         direction = direction_df["direction"].fillna(0.0)
         strength = direction_df["strength"].fillna(0.0)
+        
+        direction = direction.replace([np.inf, -np.inf], 0.0)
+        strength = strength.replace([np.inf, -np.inf], 0.0).fillna(0.0)
+
         logit0 = np.log(self.sparsity_rate / (1 - self.sparsity_rate))
 
         g = np.sign(direction) * np.tanh(strength) * i_norm.to_numpy()
@@ -730,15 +818,19 @@ class Guidance:
         i_share = imp_bit["importance"] / imp_bit["importance"].sum()
         i_rel = i_share / i_share.max()
 
+        b_star = (direction > 0).astype(int)
+
         # self.b_star = (self.bitgui["direction"] > 0).astype(int).to_numpy()
-        b_star = (direction > 0).astype(int).to_numpy()
+        # b_star = (direction > 0).astype(int).to_numpy()
 
-        # d_hat = self.bitgui["direction_strength"] / self.bitgui["direction_strength"].max()
-        d_hat = strength / strength.max()
-
-        # i_share_bit = i_share.to_numpy()
+        max_strength = strength.max()
+        if max_strength > 0:
+            d_hat = strength / max_strength
+        else:
+            d_hat = pd.Series(0.0, index=strength.index)
 
         s_bit = (i_rel.to_numpy() + d_hat.to_numpy()) / 2
+
         mutation_prob = self.mrate * ((1 - self.kappa) + self.kappa * (1-s_bit))
 
         return {
@@ -846,14 +938,16 @@ class Guidance:
 
 
     def get_feature(self, key, field, feature):
+        # print(key)
+        # print(field)
         group = self.guides[key]
         value = group[field]
 
         if isinstance(value, dict):
             return value[feature]
 
-        print(feature)
-        print(group["features"])
+        # print(feature)
+        # print(group["features"])
 
         idx = group["features"].index(feature)
         return value[idx]
