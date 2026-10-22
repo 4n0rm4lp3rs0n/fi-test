@@ -17,7 +17,7 @@ class Population:
 
     def __init__(self, population_size, search_space, evaluator,
                  guidance=None, mutation_rate=0.05, elite_size = 2, 
-                 selector = "tournament", survivors = 1, candidates_per_round = 4):
+                 selector = "tournament", survivors = 1, candidates_per_round = 4, logger = None):
         self.population_size = population_size
         self.space = search_space
         self.evaluator = evaluator
@@ -60,6 +60,7 @@ class Population:
         self.best_so_far_history = []
 
         self.current_generation = 0
+        self.logger = logger
 
     def initialize(self):
         if self.guidance is None:
@@ -68,6 +69,10 @@ class Population:
             self.members = [self.space.guided_genome(self.guidance) for _ in range(self.population_size)]
 
         self.evaluation()
+        # Trace for visualization
+        self.trace("initialization", 
+                   population=[{"id": self.logger.genome_id(g),
+                                **self.logger.snapshot(g),}for g in self.members] if self.logger else [],)
         best = max(self.members, key=lambda g: g.fitness)
         
         print(f"Best performance: {best.fitness}")
@@ -142,6 +147,10 @@ class Population:
         self.config["generations"] = gen
         next_generation = self.elitism(self.elite_size)
 
+        # Trace for visualization
+        self.trace("elitism",elites=[{"id": self.logger.genome_id(g),
+                       **self.logger.snapshot(g),}for g in next_generation] if self.logger else [],)
+
         while len(next_generation) < self.population_size:
             while True:
                 parent1 = self.selection(self.selector, self.survivors, self.candidates_per_round)[0]
@@ -150,16 +159,52 @@ class Population:
                 if parent1 is not parent2:
                     break
 
+            # Trace for visualization        
+            self.trace("selection",
+                       parent1={"id": self.logger.genome_id(parent1),**self.logger.snapshot(parent1),},
+                       parent2={"id": self.logger.genome_id(parent2),**self.logger.snapshot(parent2),},)
+
             child1, child2 = self.crossover(parent1, parent2)
 
             if child1 is None and child2 is None:
+                # Trace for visualization
+                self.trace("crossover_failed")
                 continue
+
+            # Trace for visualization
+            self.trace("crossover",
+                        parent1_id=self.logger.genome_id(parent1),
+                        parent2_id=self.logger.genome_id(parent2),
+                        child1={"id": self.logger.genome_id(child1),**self.logger.snapshot(child1),},
+                        child2={"id": self.logger.genome_id(child2),**self.logger.snapshot(child2),},
+                        )
 
             child1_mut = self.mutation(child1)
             child2_mut = self.mutation(child2)
 
+            # Trace for visualization
+            self.trace("mutation",
+                child1_before={
+                    "id": self.logger.genome_id(child1),**self.logger.snapshot(child1),
+                },
+                child1_after={
+                    "id": self.logger.genome_id(child1_mut),**self.logger.snapshot(child1_mut),
+                },
+                child2_before={
+                    "id": self.logger.genome_id(child2),**self.logger.snapshot(child2),
+                },
+                child2_after={
+                    "id": self.logger.genome_id(child2_mut),**self.logger.snapshot(child2_mut),},
+            )
+
             for child in (child1_mut, child2_mut):
                 self.single_evaluation(child)
+
+                # Trace for visualization
+                self.trace("evaluation",
+                        child_id=self.logger.genome_id(child),
+                        genome=self.logger.snapshot(child),
+                        )
 
                 if len(next_generation) < self.population_size:
                     next_generation.append(child)
@@ -173,6 +218,12 @@ class Population:
         best = max(self.members, key=lambda g: g.fitness)
         print(f"Generation {gen} - Best performance: {best.fitness}")
 
+        # Trace for visualization
+        self.trace("generation_complete",
+                    population=[{"id": self.logger.genome_id(g),
+                                **self.logger.snapshot(g),}for g in self.members] if self.logger else [],
+                    best_fitness=best.fitness,)
+        
         self.record(gen)
 
     def guidance_switch(self, switch, gui = None):
@@ -290,7 +341,8 @@ class Population:
             elite_size=self.elite_size,
             selector=self.selector,
             survivors=self.survivors,
-            candidates_per_round=self.candidates_per_round
+            candidates_per_round=self.candidates_per_round,
+            logger=copy.deepcopy(self.logger)
         )
 
         # Mutable state
@@ -306,6 +358,14 @@ class Population:
         new_pop.current_generation = self.current_generation
 
         return new_pop
+
+    def trace(self, phase, **details):
+        if self.logger is not None:
+            self.logger.log(
+                self.current_generation,
+                phase,
+                **details,
+            )
 
 class FeatureImportance(abstract.FeatureImportance):
     """Extract values from previous runs"""

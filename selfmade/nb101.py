@@ -172,6 +172,22 @@ class NASBench101Space(abstract.SearchSpace):
             
             child1_code = rebuild_code(genome1[:gen_cut] + genome2[gen_cut:], self.actual_layers + 1)
             child2_code = rebuild_code(genome2[:gen_cut] + genome1[gen_cut:], self.actual_layers + 1)
+
+            # Trace for visualization
+            # Optional detailed trace; set this attribute from Population.
+            # if getattr(self, "trace_callback", None):
+            #     self.trace_callback(
+            #         "crossover_attempt",
+            #         cut=gen_cut,
+            #         parent1_bits="".join(genome1),
+            #         parent2_bits="".join(genome2),
+            #         child1_code=child1_code,
+            #         child2_code=child2_code,
+            #         valid1=valid1,
+            #         valid2=valid2,
+            #         reason1=reason1,
+            #         reason2=reason2,
+            #     )
             
             # print(f"child 1: {child1_code}")
             # print(f"child 2: {child2_code}")
