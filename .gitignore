@@ -6,3 +6,5 @@ records/
 records*/
 datas/
 *.csv
+results/
+results*/
