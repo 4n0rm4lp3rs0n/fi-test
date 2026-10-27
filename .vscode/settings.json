@@ -1,3 +1,31 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:venv"
+    "python.defaultInterpreterPath": "${workspaceFolder}/venv37/Scripts/python.exe",
+    "python.terminal.activateEnvironment": true,
+    "python.experiments.optOutFrom": [
+        "pythonTerminalEnvVarActivation"
+    ],
+    "terminal.integrated.profiles.windows": {
+        "PowerShell": {
+            "source": "PowerShell",
+            "args": [
+                "-NoExit",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "& '${workspaceFolder}/venv37/Scripts/Activate.ps1'"
+            ]
+        },
+        "Command Prompt": {
+            "path": [
+                "${env:windir}\\Sysnative\\cmd.exe",
+                "${env:windir}\\System32\\cmd.exe"
+            ],
+            "args": [
+                "/k",
+                "${workspaceFolder}\\venv37\\Scripts\\activate.bat"
+            ],
+            "icon": "terminal-cmd"
+        }
+    },
+    "terminal.integrated.defaultProfile.windows": "PowerShell"
 }
