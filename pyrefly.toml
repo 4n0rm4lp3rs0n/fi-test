@@ -1,0 +1,5 @@
+python-version = "3.7"
+python-platform = "windows"
+site-packages-path = ["venv37/Lib/site-packages"]
+search-path = ["."]
+skip-interpreter-query = true

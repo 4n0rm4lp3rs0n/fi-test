@@ -1,6 +1,9 @@
 {
     "python.defaultInterpreterPath": "${workspaceFolder}/venv37/Scripts/python.exe",
     "python.terminal.activateEnvironment": true,
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/venv37/Lib/site-packages"
+    ],
     "python.experiments.optOutFrom": [
         "pythonTerminalEnvVarActivation"
     ],
