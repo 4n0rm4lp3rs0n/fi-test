@@ -83,6 +83,10 @@ def parse_arm(spec):
         params.setdefault("k", 1); params.setdefault("m", 6); params.setdefault("src", "gini")
         for kk, dv in (("imm", 1), ("mut", 1), ("ops_only", 0), ("vfrac", 0.0), ("alpha", 8.0), ("beta", 8.0)):
             params.setdefault(kk, dv)
+    elif head == "v3_nb":                           # neighbour-of-best variants (N1/N2) on top of D1
+        params.setdefault("k", 1); params.setdefault("m", 6); params.setdefault("mode", "n1")
+        if params["mode"] not in ("n0", "n1", "n2"):
+            raise ValueError(spec + ": mode must be n0|n1|n2")
     elif head == "v3_nov":                          # dedup + surrogate veto + novelty slot (D3 on top of D1)
         params.setdefault("k", 1); params.setdefault("m", 6); params.setdefault("src", "gini")
         params.setdefault("veto", 0.3); params.setdefault("cmin", 0.05)
@@ -127,6 +131,11 @@ def run_cell_v3(arm, seed, common, space, cev):
                     ops = v3_ops.guided_dedup_operators(pop, cfg, sig, space, counter, arm.p("k"), arm.p("m"), st, float(arm.p("vfrac")))
                 else:
                     ops = v3_ops.dedup_operators(pop, space, counter, arm.p("k"), arm.p("m"), st)
+                gv.evolve_with(pop, ops, st)
+            elif arm.spec.startswith("v3_nb"):
+                ops = gv.vanilla_operators(pop)
+                ops.screen = v3_ops.make_nb_screen(space, counter, arm.p("k"), st, pop, arm.p("mode"))
+                ops.screen_pairs = int(arm.p("m"))
                 gv.evolve_with(pop, ops, st)
             elif arm.spec.startswith("v3_nov"):
                 cfg = gv.GuideConfig(name="v3_nov", source=arm.p("src"), use_screen=True)

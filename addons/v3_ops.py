@@ -12,6 +12,8 @@ from __future__ import annotations
 import numpy as np
 
 from nasbench import api
+import random
+
 from addons import guided_v2 as gv
 from selfmade import nb101
 
@@ -187,3 +189,61 @@ def guided_dedup_operators(pop, cfg, sig, space, counter, k, m, stats, vfrac=0.0
             ops.immigrant = lambda gi=g_imm, vf=vfrac: ((space.random_genome(), False) if random.random() < vf else gi())
     ops.screen, ops.screen_pairs = make_dedup_screen(space, counter, k, stats), int(m)
     return ops
+
+
+def neighbor_genomes(space, genome):
+    """All one-edit neighbours (flip one of the 21 code bits, or change one of the 5 operations) that are VALID.
+    Uses structure only; no fitness."""
+    flat = nb101.flatten_code(genome.code)
+    layers = space.actual_layers + 1
+    out = []
+    for i, ch in enumerate(flat):
+        f = list(flat)
+        f[i] = "0" if ch == "1" else "1"
+        code = nb101.rebuild_code(f, layers)
+        if space.validate(code)[0]:
+            out.append(nb101.GenomeNB101(code, list(genome.operations)))
+    for j in range(1, len(genome.operations) - 1):
+        for op in space.operations:
+            if op != genome.operations[j]:
+                ops = list(genome.operations); ops[j] = op
+                out.append(nb101.GenomeNB101(genome.code, ops))
+    return out
+
+
+def eligible_neighbors(space, counter, best, exclude_keys, k):
+    """Unique-by-architecture valid neighbours of `best` that still have evaluation budget (count < k)."""
+    seen = set(exclude_keys); seen.add(arch_key(space, best))
+    cand = []
+    for g in neighbor_genomes(space, best):
+        key = arch_key(space, g)
+        if key in seen:
+            continue
+        seen.add(key)
+        if k is None or counter.counts.get(key, 0) < k:
+            cand.append(g)
+    return cand
+
+
+def make_nb_screen(space, counter, k, stats, pop, mode):
+    """N1/N2 (dev-stage hypotheses). Slot rule: child 1 = D1 rule; child 2 = a random eligible neighbour of the current best
+    individual (by OBSERVED fitness, as the GA itself uses) in 'active' slots, else the D1 rule.
+    mode n1: every slot active (2 neighbour children / generation); n2: only slot index 1 (1 / generation); n0: none
+    (== D1 bit for bit). One screen object per generation (slot counter)."""
+    base = make_dedup_screen(space, counter, k, stats)
+    state = {"slot": 0}
+
+    def screen(pool):
+        s = state["slot"]; state["slot"] += 1
+        c1, c2 = base(pool)
+        active = (mode == "n1") or (mode == "n2" and s == 1)
+        if not active:
+            return c1, c2
+        best = max(pop.members, key=lambda g: g.fitness)
+        cand = eligible_neighbors(space, counter, best, [arch_key(space, c1)], k)
+        stats["nb_elig"] = stats.get("nb_elig", 0) + len(cand)
+        if not cand:
+            return c1, c2
+        stats["nb_used"] = stats.get("nb_used", 0) + 1
+        return c1, random.choice(cand)
+    return screen

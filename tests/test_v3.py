@@ -139,12 +139,64 @@ class TestV3(unittest.TestCase):
             for d in v[1:]:
                 self.assertTrue((d == v[0]).all())
 
+    def test_neighbor_neutral_equals_D1(self):
+        out = tempfile.mkdtemp()
+        try:
+            run(out, ["v3_dedup:k=1,m=6", "v3_nb:k=1,m=6,mode=n0"], [11, 22])
+            by = {}
+            for v in cells(out).values():
+                by.setdefault(v["seed"], {})[v["arm"]] = v
+            for s, d in by.items():
+                self.assertEqual([h["best_so_far"] for h in d["v3_dedup:k=1,m=6"]["history"]],
+                                 [h["best_so_far"] for h in d["v3_nb:k=1,m=6,mode=n0"]["history"]])
+        finally:
+            shutil.rmtree(out, True)
+
+    def test_neighbor_arms_budget_and_intensity(self):
+        out = tempfile.mkdtemp()
+        try:
+            run(out, ["v3_nb:k=1,m=6,mode=n1", "v3_nb:k=1,m=6,mode=n2"], [11, 22])
+            used = {}
+            for fn, c in cells(out).items():
+                self.assertEqual(c["n_evals"], 76, fn)
+                used[c["arm"]] = used.get(c["arm"], 0) + sum(h.get("nb_used", 0) for h in c["history"])
+            self.assertGreater(used["v3_nb:k=1,m=6,mode=n2"], 0)
+            self.assertGreater(used["v3_nb:k=1,m=6,mode=n1"], 0)
+            # NOTE: n1 may use FEWER neighbours in total than n2: with k=1 the neighbours of an unchanged best individual
+            # get exhausted faster at 2 per generation (then the arm falls back to the D1 rule) - not a bug.
+            # n1: <= 2 neighbour children per generation, n2: <= 1 per generation (19 generations, 2 seeds)
+            self.assertLessEqual(used["v3_nb:k=1,m=6,mode=n1"], 2 * 19 * 2)
+            self.assertLessEqual(used["v3_nb:k=1,m=6,mode=n2"], 1 * 19 * 2)
+        finally:
+            shutil.rmtree(out, True)
+
+    def test_neighbors_are_valid_unique_and_respect_cap(self):
+        space = nb101.NASBench101Space()
+        import random as rnd
+        rnd.seed(5)
+        class C(object): counts = {}
+        for _ in range(30):
+            g = space.random_genome()
+            nbs = v3_ops.neighbor_genomes(space, g)
+            self.assertTrue(all(space.validate(x.code)[0] for x in nbs))
+            self.assertTrue(all(sum(a != b for a, b in zip(nb101.flatten_code(x.code), nb101.flatten_code(g.code))) + sum(a != b for a, b in zip(x.operations, g.operations)) == 1 for x in nbs))
+            el = v3_ops.eligible_neighbors(space, C, g, [], 1)
+            keys = [v3_ops.arch_key(space, x) for x in el]
+            self.assertEqual(len(keys), len(set(keys)))
+            self.assertNotIn(v3_ops.arch_key(space, g), keys)
+            if el:                                              # a neighbour at the cap must be excluded
+                C.counts = {keys[0]: 1}
+                el2 = v3_ops.eligible_neighbors(space, C, g, [], 1)
+                self.assertNotIn(keys[0], [v3_ops.arch_key(space, x) for x in el2]); C.counts = {}
+
     def test_arm_parsing(self):
         a = V.parse_arm("v3_dedup:k=inf,m=6"); self.assertIsNone(a.p("k")); self.assertEqual(a.p("m"), 6)
         self.assertEqual(V.parse_arm("v3_dedup:k=2,m=3").p("k"), 2)
         r = V.parse_arm("v3_rimm:k=1,m=6"); self.assertEqual((r.p("k"), r.p("m"), r.p("n_imm")), (1, 6, 1))
         with self.assertRaises(ValueError): V.parse_arm("v3_dedup:k=2")
         with self.assertRaises(ValueError): V.parse_arm("v3_bogus:k=2,m=3")
+        with self.assertRaises(ValueError): V.parse_arm("v3_nb:k=1,m=6,mode=zz")
+        self.assertEqual(V.parse_arm("v3_nb:k=1,m=6,mode=n2").p("mode"), "n2")
         self.assertEqual(V.parse_arm("vanilla").kind, "vanilla")
 
     def test_seed_sets(self):
